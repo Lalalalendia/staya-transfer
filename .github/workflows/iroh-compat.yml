@@ -31,7 +31,7 @@ jobs:
       - name: Real FsStore to Staya Bao verification
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
-          STY_INTEROP_OUTPUT_DIR: proof-artifact
+          STY_INTEROP_OUTPUT_DIR: ${{ github.workspace }}/proof-artifact
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_compat -- --exact actual_fsstore_bao_outboard_authenticates_in_staya --nocapture
       - uses: actions/upload-artifact@v4
         with:
