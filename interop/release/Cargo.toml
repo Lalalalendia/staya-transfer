@@ -16,6 +16,10 @@ path = "../fsstore_compat.rs"
 name = "fsstore_network_get"
 path = "../fsstore_network_get.rs"
 
+[[test]]
+name = "fsstore_partial_gate"
+path = "../fsstore_partial_gate.rs"
+
 [dependencies]
 staya-transfer = { path = "../..", features = ["bao"] }
 bao-tree = { version = "=0.16.1", default-features = false, features = ["fs"] }

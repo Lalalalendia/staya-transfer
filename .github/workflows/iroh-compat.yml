@@ -38,6 +38,10 @@ jobs:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
           STY_QUIC_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_network_get -- --exact direct_quic_get_bao_peer_policy_reconnect --nocapture
+      - name: STY-G2-02 pinned FsStore partial import, clean reopen and Bao audit
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact pinned_partial_import_clean_reopen_with_physical_bao_audit --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
