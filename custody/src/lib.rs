@@ -103,7 +103,18 @@ impl StoreLease {
             .create(true)
             .truncate(false)
             .open(&lock_path)?;
-        let lock_identity = Handle::from_file(file.try_clone()?)?;
+        // Compare the actual newly opened file against its directory entry.
+        // Do NOT retain a duplicate of the locking file description for the
+        // entire lease: File::try_lock on Unix is flock-based, and a retained
+        // try_clone() can extend lock lifetime until the duplicate is closed.
+        // A fresh path-based Handle is an independently opened descriptor used
+        // ONLY for identity checks; it is never the locking descriptor.
+        let opened_identity = Handle::from_file(file.try_clone()?)?;
+        let lock_identity = Handle::from_path(&lock_path)?;
+        if opened_identity != lock_identity {
+            return Err(invalid("custody lockfile changed during acquisition"));
+        }
+        drop(opened_identity);
         file.try_lock().map_err(io::Error::from)?;
         let guard = Self {
             canonical_root,
