@@ -2,14 +2,6 @@
 //! Only ephemeral direct loopback QUIC, explicit peer and hash authorization.
 //! This does NOT enable Akula user-file access, relay or crash-safe resume.
 
-use std::{
-    fs,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, endpoint::presets, protocol::Router};
 use iroh_blobs::{
     BlobsProtocol, Hash,
@@ -28,6 +20,14 @@ use staya_transfer::{
     ByteRange, ContentId, Manifest, TransferError, TransferRequest,
     bao::{MAX_BAO_PROOF_BYTES, verify_bao_range},
 };
+use std::{
+    fs,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(100);
 const STEP_TIMEOUT: Duration = Duration::from_secs(8);
@@ -43,7 +43,10 @@ async fn local_endpoint(secret: SecretKey) -> Endpoint {
         .expect("private direct-only loopback endpoint")
 }
 
-fn deny_by_default(allowed_peer: EndpointId, permitted_hash: Hash) -> (EventSender, tokio::task::JoinHandle<()>, Arc<AtomicUsize>) {
+fn deny_by_default(
+    allowed_peer: EndpointId,
+    permitted_hash: Hash,
+) -> (EventSender, tokio::task::JoinHandle<()>, Arc<AtomicUsize>) {
     let mask = EventMask {
         connected: ConnectMode::Intercept,
         get: RequestMode::Intercept,
@@ -63,11 +66,26 @@ fn deny_by_default(allowed_peer: EndpointId, permitted_hash: Hash) -> (EventSend
                     if !allowed {
                         refused_in_worker.fetch_add(1, Ordering::SeqCst);
                     }
-                    let _ = msg.tx.send(if allowed { Ok(()) } else { Err(AbortReason::Permission) }).await;
+                    let _ = msg
+                        .tx
+                        .send(if allowed {
+                            Ok(())
+                        } else {
+                            Err(AbortReason::Permission)
+                        })
+                        .await;
                 }
                 ProviderMessage::GetRequestReceived(msg) => {
-                    let allowed = msg.request.ranges.is_blob() && msg.request.hash == permitted_hash;
-                    let _ = msg.tx.send(if allowed { Ok(()) } else { Err(AbortReason::Permission) }).await;
+                    let allowed =
+                        msg.request.ranges.is_blob() && msg.request.hash == permitted_hash;
+                    let _ = msg
+                        .tx
+                        .send(if allowed {
+                            Ok(())
+                        } else {
+                            Err(AbortReason::Permission)
+                        })
+                        .await;
                 }
                 ProviderMessage::ObserveRequestReceived(msg) => {
                     let _ = msg.tx.send(Err(AbortReason::Permission)).await;
@@ -91,8 +109,13 @@ async fn bounded_wire_get(
     let request = postcard::to_stdvec(&Request::Get(get))
         .map_err(|e| format!("serialize get request: {e}"))?;
     assert!(request.len() <= 1024 * 1024);
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| format!("open QUIC: {e}"))?;
-    send.write_all(&request).await.map_err(|e| format!("send GET: {e}"))?;
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| format!("open QUIC: {e}"))?;
+    send.write_all(&request)
+        .await
+        .map_err(|e| format!("send GET: {e}"))?;
     send.finish().map_err(|e| format!("finish GET: {e}"))?;
     recv.read_to_end(MAX_BAO_PROOF_BYTES + 8)
         .await
@@ -110,7 +133,11 @@ fn verify_network_response(
     if wire.len() < 8 {
         return Err(TransferError::CorruptData);
     }
-    let size = u64::from_le_bytes(wire[..8].try_into().map_err(|_| TransferError::CorruptData)?);
+    let size = u64::from_le_bytes(
+        wire[..8]
+            .try_into()
+            .map_err(|_| TransferError::CorruptData)?,
+    );
     if size != manifest.size {
         return Err(TransferError::CorruptData);
     }
