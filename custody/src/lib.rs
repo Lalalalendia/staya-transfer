@@ -156,6 +156,18 @@ impl StoreLease {
         Ok(())
     }
 
+    /// Experimental explicit release for a **quiescent** cooperative owner.
+    ///
+    /// Test the difference between kernel LOCK_UN and relying only on close().
+    /// Must be called ONLY after all FsStore writers are stopped; LOCK_UN
+    /// also releases the lock from fork-inherited/cloned file descriptions.
+    /// G2-05d must not use this as a production fix until the failure's
+    /// cause and fork inheritance behavior are independently verified.
+    pub fn release(self) -> io::Result<()> {
+        self.validate_fence()?;
+        self._held_exclusive_lock.unlock()
+    }
+
     /// Only diagnostic/read-only; no caller may move/delete this lockfile.
     pub fn lock_path(&self) -> &Path {
         &self.lock_path
