@@ -103,7 +103,11 @@ impl ActiveFsStore {
         // ActiveFsStore::drop alone cannot protect a not-yet-built object.
         let mut opening = OpeningFsStore { owner: Some(owner) };
         let actor = FsStore::load(
-            opening.owner.as_ref().expect("opening custody invariant").canonical_root(),
+            opening
+                .owner
+                .as_ref()
+                .expect("opening custody invariant")
+                .canonical_root(),
         )
         .await
         .map_err(|e| format!("load real pinned FsStore: {e}"))?;
