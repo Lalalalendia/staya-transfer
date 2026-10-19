@@ -1,0 +1,14 @@
+[package]
+name = "staya-transfer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Transport-neutral bounded transfer contracts for the Staya network"
+repository = "https://github.com/Lalalalendia/staya-transfer"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
