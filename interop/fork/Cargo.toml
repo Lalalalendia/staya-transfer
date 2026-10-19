@@ -20,6 +20,10 @@ path = "../fsstore_network_get.rs"
 name = "fsstore_partial_gate"
 path = "../fsstore_partial_gate.rs"
 
+[[test]]
+name = "fsstore_crash_gate"
+path = "../fsstore_crash_gate.rs"
+
 [dependencies]
 staya-transfer = { path = "../..", features = ["bao"] }
 staya-custody-lab = { path = "../../custody" }
