@@ -250,10 +250,19 @@ async fn run_and_reopen(mode: &str) {
             );
         }
         #[cfg(windows)]
-        assert!(
-            candidates.is_empty(),
-            "Windows directory durability is unsupported and must fail closed"
-        );
+        {
+            assert!(
+                candidates.is_empty(),
+                "Windows directory durability is unsupported and must fail closed"
+            );
+            // This mode cleanly shut down the actor before TerminateProcess.
+            // A physical Bao readback MUST succeed before our final PASS marker
+            // may claim one. This is still not a power-loss durability test.
+            assert!(
+                physically_verified,
+                "Windows clean-shutdown attempt must pass post-kill physical Bao audit"
+            );
+        }
     }
 
     // Reopen the real pinned store in the second process, but never promote
