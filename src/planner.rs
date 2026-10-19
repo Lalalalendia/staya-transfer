@@ -82,7 +82,8 @@ impl VerifiedCheckpoint {
     #[cfg(feature = "bao")]
     pub fn staged_ranges(&self) -> impl Iterator<Item = &VerifiedBaoRange> {
         self.held.iter()
-    }}
+    }
+}
 
 /// Lazily produces missing intervals without proportional memory allocation.
 #[derive(Debug)]
