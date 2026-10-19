@@ -12,14 +12,14 @@ use bao_tree::{
 };
 use iroh_blobs::{Hash, api::blobs::BlobStatus, store::fs::FsStore};
 use partial_adapter::{audit_clean_closed_fixture, stage_verified_fixture};
-use staya_transfer::{
-    ByteRange, ContentId, Manifest,
-    recovery::{BaoStorageProfile, StoreIdentity},
-};
 use staya_custody_lab::{
     StoreLease,
     checkpoint::{CheckpointClaim, IROH_PREORDER_16K, read_candidates},
     partial_barrier::publish_after_quiescent_audit,
+};
+use staya_transfer::{
+    ByteRange, ContentId, Manifest,
+    recovery::{BaoStorageProfile, StoreIdentity},
 };
 use std::{
     fs,

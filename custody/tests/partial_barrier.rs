@@ -1,11 +1,11 @@
 //! STY-G2-04b does NOT prove full FsStore crash survival.
+#[cfg(unix)]
+use staya_custody_lab::checkpoint::MetadataBarrier;
 use staya_custody_lab::{
     StoreLease,
     checkpoint::{CheckpointClaim, IROH_PREORDER_16K, read_candidates},
     partial_barrier::{PartialPaths, publish_after_quiescent_audit},
 };
-#[cfg(unix)]
-use staya_custody_lab::checkpoint::MetadataBarrier;
 use std::{
     fs, io,
     path::{Path, PathBuf},
