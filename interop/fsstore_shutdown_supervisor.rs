@@ -11,9 +11,7 @@
 //! not guarantee timely reacquisition, adversarial pathname safety, or
 //! power-loss durability. It is not used by Akula's production File Gate.
 
-use crate::partial_adapter::{
-    AcceptedIntoUncommittedFsStore, stage_with_inflight_budget,
-};
+use crate::partial_adapter::{AcceptedIntoUncommittedFsStore, stage_with_inflight_budget};
 use iroh_blobs::store::fs::FsStore;
 use staya_custody_lab::{
     StoreLease,
@@ -63,8 +61,7 @@ pub struct QuiescentFsStore {
 
 impl ActiveFsStore {
     pub async fn open(root: &Path, limits: Limits) -> Result<Self, String> {
-        let owner =
-            StoreLease::acquire(root).map_err(|e| format!("exclusive OS custody: {e}"))?;
+        let owner = StoreLease::acquire(root).map_err(|e| format!("exclusive OS custody: {e}"))?;
         owner
             .validate_fence()
             .map_err(|e| format!("initial physical custody: {e}"))?;
@@ -141,7 +138,10 @@ impl ClosingFsStore {
             .expect("active custody invariant")
             .validate_fence()
         {
-            return Err((self, format!("physical custody changed before actor shutdown: {err}")));
+            return Err((
+                self,
+                format!("physical custody changed before actor shutdown: {err}"),
+            ));
         }
         if let Err(err) = self
             .active
@@ -160,7 +160,10 @@ impl ClosingFsStore {
             .expect("active custody invariant")
             .validate_fence()
         {
-            return Err((self, format!("physical custody changed after actor shutdown: {err}")));
+            return Err((
+                self,
+                format!("physical custody changed after actor shutdown: {err}"),
+            ));
         }
 
         let ClosingFsStore { mut active } = self;
