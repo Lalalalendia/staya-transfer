@@ -26,8 +26,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Enforce pinned G1e Cargo.lock (no dependency re-resolution)
-        run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1 > /dev/null
+      - name: Generate reviewable G2-04b Cargo.lock for each variant
+        run: |
+          cargo generate-lockfile --manifest-path interop/${{ matrix.variant }}/Cargo.toml
+          echo STY_G2_04B_LOCK_BEGIN
+          cat interop/${{ matrix.variant }}/Cargo.lock
+          echo STY_G2_04B_LOCK_END
       - name: Real FsStore to Staya Bao verification
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
