@@ -1,0 +1,185 @@
+use std::{
+    fs,
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use staya_custody_lab::StoreLease;
+
+fn private_root(label: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "staya-g2-03-{}-{}-{nonce}",
+        std::process::id(),
+        label
+    ));
+    fs::create_dir(&path).expect("private empty root");
+    path
+}
+
+fn worker(mode: &str, path: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_staya-custody-worker"))
+        .arg(mode)
+        .arg(path)
+        .output()
+        .expect("independent custody worker")
+}
+
+fn stdout_text(output: &std::process::Output) -> String {
+    assert!(
+        output.status.success(),
+        "worker error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout.clone())
+        .expect("worker utf8")
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn two_processes_and_normal_release() {
+    let root = private_root("normal");
+    let lease = StoreLease::acquire(&root).expect("first owner");
+    assert_eq!(stdout_text(&worker("probe", &root)), "BUSY");
+    lease.validate_fence().expect("owner still owns same identity");
+    drop(lease);
+
+    // A stale lockfile still exists but MUST NOT block a new real OS owner.
+    assert!(root.join(".staya-writer.lock").is_file());
+    assert_eq!(stdout_text(&worker("probe", &root)), "ACQUIRED");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn terminate_owner_then_reacquire_in_separate_process() {
+    let root = private_root("terminate");
+    let mut child: Child = Command::new(env!("CARGO_BIN_EXE_staya-custody-worker"))
+        .arg("hold")
+        .arg(&root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn real owner");
+    let mut line = String::new();
+    let mut reader = BufReader::new(child.stdout.take().expect("child output"));
+    let read = reader.read_line(&mut line).expect("child lock acquisition");
+    assert!(read > 0, "child terminated before admitting owner");
+    assert_eq!(line.trim(), "ACQUIRED");
+    assert_eq!(stdout_text(&worker("probe", &root)), "BUSY");
+
+    // Real SIGKILL on Linux; Child::kill invokes TerminateProcess on Windows.
+    // There is intentionally no graceful FsStore or journal shutdown here.
+    child.kill().expect("terminate owner process");
+    child.wait().expect("reap terminated child");
+    assert_eq!(stdout_text(&worker("probe", &root)), "ACQUIRED");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn replacing_custody_lockfile_invalidates_prior_lease() {
+    let root = private_root("lock-swap");
+    let lease = StoreLease::acquire(&root).unwrap();
+    let lock = lease.lock_path().to_owned();
+    let moved = root.join("old-locked-inode");
+
+    // Windows may forbid renaming open locked handles; that denial itself
+    // prevents replacement. Unix generally allows rename of a held inode.
+    if fs::rename(&lock, &moved).is_ok() {
+        fs::write(&lock, b"new inode").unwrap();
+        assert!(lease.validate_fence().is_err(), "old owner must HOLD");
+        drop(lease);
+        fs::remove_dir_all(root).unwrap();
+    } else {
+        lease.validate_fence().expect("OS blocked replacement");
+        drop(lease);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn directory_replacement_invalidates_prior_lease() {
+    let root = private_root("directory-swap");
+    let lease = StoreLease::acquire(&root).unwrap();
+    let moved = root.with_extension("renamed");
+
+    if fs::rename(&root, &moved).is_ok() {
+        fs::create_dir(&root).unwrap();
+        assert!(lease.validate_fence().is_err(), "root inode changed");
+        drop(lease);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(moved).unwrap();
+    } else {
+        lease.validate_fence().expect("OS prevents moved open directory");
+        drop(lease);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn alias_of_same_root_does_not_acquire_second_writer() {
+    let root = private_root("alias");
+    let guard = StoreLease::acquire(&root).unwrap();
+    // Canonical spellings reach the same inode and must not bypass ownership.
+    let alias = root.join(".").join(".");
+    assert_eq!(stdout_text(&worker("probe", &alias)), "BUSY");
+    guard.validate_fence().unwrap();
+    drop(guard);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn symbolic_link_alias_is_denied() {
+    use std::os::unix::fs::symlink;
+    let root = private_root("symlink");
+    let alias = root.with_extension("link");
+    symlink(&root, &alias).unwrap();
+    assert!(StoreLease::acquire(&alias).is_err());
+    fs::remove_file(alias).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_symlink_alias_is_denied_if_creation_permitted() {
+    use std::os::windows::fs::symlink_dir;
+    let root = private_root("symlink");
+    let alias = root.with_extension("link");
+    if symlink_dir(&root, &alias).is_ok() {
+        assert!(StoreLease::acquire(&alias).is_err());
+        fs::remove_dir(alias).unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn hard_link_to_locked_file_cannot_acquire_separate_lock() {
+    use std::fs::{OpenOptions, TryLockError};
+    let root = private_root("hardlink");
+    let lease = StoreLease::acquire(&root).unwrap();
+    let alias = root.join("hardlink-to-lease");
+    fs::hard_link(lease.lock_path(), &alias).expect("same-volume hardlink");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(alias)
+        .unwrap();
+    assert!(matches!(file.try_lock(), Err(TryLockError::WouldBlock)));
+    drop(file);
+    drop(lease);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn missing_root_is_never_created_by_untrusted_request() {
+    let root = private_root("nonexistent");
+    fs::remove_dir(&root).unwrap();
+    assert!(StoreLease::acquire(&root).is_err());
+    assert!(!root.exists());
+}
