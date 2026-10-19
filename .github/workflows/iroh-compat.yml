@@ -58,6 +58,10 @@ jobs:
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit --nocapture
+      - name: STY-G2-05h3a real FsStore OS worker clean join and forced kill
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_os_process_supervisor_clean_and_kill --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
