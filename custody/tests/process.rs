@@ -172,8 +172,12 @@ fn debug_lock_ownership(_root: &Path) -> String {
 fn repeated_drop_and_reacquire_has_no_stale_lock_descriptor() {
     let root = private_root("reacquire-128");
     for cycle in 0..128 {
-        let lease = StoreLease::acquire(&root)
-            .unwrap_or_else(|err| panic!("reacquire cycle {cycle} failed: {err:?}; {}", debug_lock_ownership(&root)));
+        let lease = StoreLease::acquire(&root).unwrap_or_else(|err| {
+            panic!(
+                "reacquire cycle {cycle} failed: {err:?}; {}",
+                debug_lock_ownership(&root)
+            )
+        });
         lease.validate_fence().expect("owned physical identity");
         if cycle % 32 == 0 {
             assert_eq!(
