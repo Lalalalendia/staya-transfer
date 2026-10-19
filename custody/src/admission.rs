@@ -151,6 +151,75 @@ impl Admission {
     }
 }
 
+
+/// A process-local, thread-safe logical capacity ledger. Not shared between
+/// independent processes, and not a hard limit on FsStore's physical disk use.
+/// The cooperative StoreLease must still be held by the caller.
+#[derive(Clone, Debug)]
+pub struct SharedAdmission {
+    inner: std::sync::Arc<std::sync::Mutex<Admission>>,
+}
+
+impl SharedAdmission {
+    pub fn new(limits: Limits) -> io::Result<Self> {
+        Ok(Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(Admission::new(limits)?)),
+        })
+    }
+
+    /// Atomically hold the entire reservation until its unique permit drops.
+    /// A poisoned ledger always refuses admission rather than using stale
+    /// resource totals. Never hold the mutex across filesystem or async work.
+    pub fn reserve(&self, request: Reservation) -> io::Result<InflightPermit> {
+        let mut ledger = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("resource ledger poisoned"))?;
+        ledger.reserve(request)?;
+        Ok(InflightPermit {
+            ledger: std::sync::Arc::clone(&self.inner),
+            reserved: request,
+        })
+    }
+
+    pub fn usage(&self) -> io::Result<(u32, u64, u32)> {
+        let ledger = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("resource ledger poisoned"))?;
+        Ok(ledger.usage())
+    }
+
+    pub fn retry_allowed(&self, failures_so_far: u32) -> io::Result<bool> {
+        let ledger = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("resource ledger poisoned"))?;
+        Ok(ledger.retry_allowed(failures_so_far))
+    }
+}
+
+/// A non-cloneable in-flight reservation. Drop releases the exact allocation.
+/// Unlike the old caller-managed release API, consumers cannot fabricate a
+/// partial release and free resources while an import is still admitted.
+#[derive(Debug)]
+pub struct InflightPermit {
+    ledger: std::sync::Arc<std::sync::Mutex<Admission>>,
+    reserved: Reservation,
+}
+
+impl Drop for InflightPermit {
+    fn drop(&mut self) {
+        if let Ok(mut ledger) = self.ledger.lock() {
+            // Unexpected ledger corruption must fail conservatively: the
+            // accounting remains reserved and future admission is refused.
+            let _ = ledger.release(self.reserved);
+        }
+        // A poisoned lock also remains unusable by SharedAdmission::reserve.
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +231,44 @@ mod tests {
             max_open_handles: 4,
             max_retries_per_object: 3,
         }
+    }
+
+    #[test]
+    fn shared_permit_holds_across_other_threads_and_releases_exactly_once() {
+        let shared = SharedAdmission::new(limits()).unwrap();
+        let req = Reservation::new(2, 1024, 4).unwrap();
+        let permit = shared.reserve(req).unwrap();
+        assert_eq!(shared.usage().unwrap(), (2, 1024, 4));
+
+        let separate = shared.clone();
+        std::thread::spawn(move || {
+            assert!(separate.reserve(Reservation::new(1, 1, 1).unwrap()).is_err());
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(shared.usage().unwrap(), (2, 1024, 4));
+        drop(permit);
+        assert_eq!(shared.usage().unwrap(), (0, 0, 0));
+        let second = shared.reserve(req).unwrap();
+        assert_eq!(shared.usage().unwrap(), (2, 1024, 4));
+        drop(second);
+        assert_eq!(shared.usage().unwrap(), (0, 0, 0));
+    }
+
+    #[test]
+    fn shared_admission_rejects_overflow_and_cannot_leak_on_scope_exit() {
+        let shared = SharedAdmission::new(limits()).unwrap();
+        let huge = Reservation::new(u32::MAX, u64::MAX, u32::MAX).unwrap();
+        assert!(shared.reserve(huge).is_err());
+        assert_eq!(shared.usage().unwrap(), (0, 0, 0));
+        {
+            let _permit = shared.reserve(Reservation::new(1, 256, 2).unwrap()).unwrap();
+            assert_eq!(shared.usage().unwrap(), (1, 256, 2));
+        }
+        assert_eq!(shared.usage().unwrap(), (0, 0, 0));
+        assert!(shared.retry_allowed(2).unwrap());
+        assert!(!shared.retry_allowed(3).unwrap());
     }
 
     #[test]
