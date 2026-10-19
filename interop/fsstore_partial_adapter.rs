@@ -9,11 +9,16 @@ use bao_tree::{
     io::{outboard::PreOrderOutboard, round_up_to_chunks, sync::valid_ranges},
 };
 use iroh_blobs::{Hash, protocol::ChunkRangesExt, store::fs::FsStore};
+use staya_custody_lab::{
+    StoreLease,
+    admission::{InflightPermit, Reservation, SharedAdmission},
+};
 use staya_transfer::{
     ByteRange, TransferRequest,
     bao::{MAX_BAO_PROOF_BYTES, verify_bao_range},
     recovery::{BaoStorageProfile, StoreIdentity},
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     fs,
     io::{Read, Seek, SeekFrom},
@@ -72,6 +77,62 @@ pub async fn stage_verified_fixture(
         .map_err(|e| format!("pinned FsStore refused Bao import: {e}"))?;
 
     Ok(AcceptedIntoUncommittedFsStore)
+}
+
+/// G2-05f: bound the *in-flight* partial Bao import while a cooperating
+/// process holds the OS store lease. The returned permit remains live until
+/// the caller finishes with the uncommitted staged range.
+///
+/// The logical byte budget accounts for decoded range plus incoming proof
+/// bytes; it is NOT a physical disk-space or memory allocator quota. On
+/// cancellation after actor submission, the actor may already have written
+/// verified bytes: we return an error, never a durable checkpoint or a
+/// verified post-restart range. Cancellation cannot interrupt an upstream
+/// FsStore actor already processing the accepted import.
+// This shared test adapter is also compiled by fsstore_crash_gate, which
+// deliberately does not exercise G2-05f admission. The function is used by
+// fsstore_partial_gate on both pinned dependency variants.
+#[allow(
+    dead_code,
+    reason = "used by the partial-import test, not by the crash test"
+)]
+pub async fn stage_with_inflight_budget(
+    owner: &StoreLease,
+    ledger: &SharedAdmission,
+    store: &FsStore,
+    expected: StoreIdentity,
+    range: ByteRange,
+    wire: &[u8],
+    cancelled: &AtomicBool,
+) -> Result<(AcceptedIntoUncommittedFsStore, InflightPermit), String> {
+    owner
+        .validate_fence()
+        .map_err(|err| format!("store ownership is invalid: {err}"))?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("import cancelled before store admission".to_owned());
+    }
+    let wire_size =
+        u64::try_from(wire.len()).map_err(|_| "incoming Bao proof length cannot fit accounting")?;
+    let logical_bytes = range
+        .len()
+        .checked_add(wire_size)
+        .ok_or("incoming plus decoded byte budget overflow")?;
+    let request = Reservation::new(1, logical_bytes, 4)
+        .map_err(|err| format!("invalid in-flight resource request: {err}"))?;
+    let permit = ledger
+        .reserve(request)
+        .map_err(|err| format!("FsStore admission denied: {err}"))?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("import cancelled while reserved, before actor call".to_owned());
+    }
+    let accepted = stage_verified_fixture(store, expected, range, wire).await?;
+    owner
+        .validate_fence()
+        .map_err(|err| format!("store ownership lost after uncommitted import: {err}"))?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("import cancelled after staging; no checkpoint authorized".to_owned());
+    }
+    Ok((accepted, permit))
 }
 
 /// Reconstruct proof from **actual test-only private** FsStore data/outboard

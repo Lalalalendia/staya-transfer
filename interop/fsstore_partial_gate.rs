@@ -11,9 +11,12 @@ use bao_tree::{
     io::{outboard::PreOrderMemOutboard, round_up_to_chunks, sync::encode_ranges_validated},
 };
 use iroh_blobs::{Hash, api::blobs::BlobStatus, store::fs::FsStore};
-use partial_adapter::{audit_clean_closed_fixture, stage_verified_fixture};
+use partial_adapter::{
+    audit_clean_closed_fixture, stage_verified_fixture, stage_with_inflight_budget,
+};
 use staya_custody_lab::{
     StoreLease,
+    admission::{Limits, SharedAdmission},
     checkpoint::{CheckpointClaim, IROH_PREORDER_16K, read_candidates},
     partial_barrier::publish_after_quiescent_audit,
 };
@@ -24,6 +27,7 @@ use staya_transfer::{
 use std::{
     fs,
     io::{self, Seek, SeekFrom, Write},
+    sync::atomic::AtomicBool,
     time::Duration,
 };
 
@@ -253,4 +257,126 @@ async fn pinned_partial_import_clean_reopen_with_physical_bao_audit() {
     })
     .await
     .expect("bounded G2-02 partial-store fixture");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_fsstore_admission_rejects_before_write_and_releases_after_stage() {
+    tokio::time::timeout(TIMEOUT, async {
+        let root = std::env::temp_dir().join(format!(
+            "staya-g2-05f-{}-{}",
+            std::process::id(),
+            std::env::var("STY_INTEROP_VARIANT").unwrap_or_else(|_| "ci".to_owned()),
+        ));
+        assert!(!root.exists(), "fresh disposable directory only");
+        fs::create_dir(&root).expect("new private test store");
+        let owner = StoreLease::acquire(&root).expect("single cooperative owner");
+        let payload = make_data();
+        let (identity, wire) = prepare(&payload);
+        let hash = Hash::from_bytes(identity.manifest.id.0);
+        let store = FsStore::load(&root).await.expect("pinned real FsStore");
+
+        let required = range()
+            .len()
+            .checked_add(u64::try_from(wire.len()).unwrap())
+            .unwrap();
+        let small = SharedAdmission::new(Limits {
+            max_partial_objects: 1,
+            max_reserved_bytes: required - 1,
+            max_open_handles: 4,
+            max_retries_per_object: 2,
+        })
+        .unwrap();
+        let budget = SharedAdmission::new(Limits {
+            max_partial_objects: 1,
+            max_reserved_bytes: required,
+            max_open_handles: 4,
+            max_retries_per_object: 2,
+        })
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        assert!(
+            stage_with_inflight_budget(
+                &owner, &small, &store, identity, range(), &wire, &cancelled,
+            )
+            .await
+            .is_err(),
+            "one byte below the conservative logical budget must refuse before IO"
+        );
+        assert_eq!(small.usage().unwrap(), (0, 0, 0));
+        assert!(
+            matches!(
+                store.blobs().status(hash).await.unwrap(),
+                BlobStatus::NotFound
+            ),
+            "budget denial must not create FsStore partial metadata"
+        );
+
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            stage_with_inflight_budget(
+                &owner, &budget, &store, identity, range(), &wire, &cancelled,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(budget.usage().unwrap(), (0, 0, 0));
+        cancelled.store(false, std::sync::atomic::Ordering::Release);
+
+        let mut invalid_wire = wire.clone();
+        let middle = invalid_wire.len() / 2;
+        invalid_wire[middle] ^= 0x40;
+        assert!(
+            stage_with_inflight_budget(
+                &owner, &budget, &store, identity, range(), &invalid_wire, &cancelled,
+            )
+            .await
+            .is_err(),
+            "invalid Bao proof may not bypass budget or mutate actor"
+        );
+        assert_eq!(budget.usage().unwrap(), (0, 0, 0));
+        assert!(matches!(
+            store.blobs().status(hash).await.unwrap(),
+            BlobStatus::NotFound
+        ));
+
+        let (_accepted, permit) = stage_with_inflight_budget(
+            &owner, &budget, &store, identity, range(), &wire, &cancelled,
+        )
+        .await
+        .expect("real verified partial Bao admitted");
+        assert_eq!(budget.usage().unwrap(), (1, required, 4));
+        assert!(
+            stage_with_inflight_budget(
+                &owner, &budget, &store, identity, range(), &wire, &cancelled,
+            )
+            .await
+            .is_err(),
+            "second pending import must be refused while permit is alive"
+        );
+        assert_eq!(budget.usage().unwrap(), (1, required, 4));
+        drop(permit);
+        assert_eq!(budget.usage().unwrap(), (0, 0, 0));
+        store.shutdown().await.expect("clean shutdown is NOT SIGKILL");
+        drop(store);
+
+        let audited = audit_clean_closed_fixture(&root, identity, range())
+            .expect("independent physical Bao readback");
+        assert_eq!(audited, payload[START as usize..END as usize]);
+        assert!(
+            read_candidates(
+                &owner, identity.manifest.id.0, identity.manifest.size,
+                IROH_PREORDER_16K,
+            )
+            .unwrap()
+            .is_empty(),
+            "uncommitted actor acceptance never creates a checkpoint claim"
+        );
+        drop(owner);
+        fs::remove_dir_all(root).expect("remove only test directory");
+        println!(
+            "STY_G2_05F real_fsstore=true admission_before_write=true cancel_preimport=true bounded_bao_proof=true concurrent_limit=true physical_audit=true durable_ack=false actual_disk_quota=false file_gate=false"
+        );
+    })
+    .await
+    .expect("bounded G2-05f real FsStore fixture");
 }
