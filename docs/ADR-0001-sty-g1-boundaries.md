@@ -18,8 +18,13 @@ Parent roadmap: [STY-MASTER-PLAN-02](https://app.notion.com/p/3fe32a84beec81e5ac
 
 The `lab::fetch_complete` mock reads bounded byte ranges from in-memory
 `RangeSource` implementations. It caps each request at 1 MiB, each test
-object at 8 MiB, sources at 16 and retries at 8, regardless of external
-request configuration. It does not make sockets or filesystem writes.
+object at 8 MiB, sources at 16, retries at 8 *per range* and total ranges
+at 4096, regardless of external request configuration.
+The source writes into a borrowed, caller-owned output slice; it cannot
+return an arbitrarily large response vector to the transfer coordinator.
+An adapter must **also** limit its own network buffers and reject oversized
+wire frames BEFORE allocation. A Rust trait does not make arbitrary adapter
+code resource-safe. No sockets or filesystem writes exist in this mock.
 
 Returned `VerifiedObject` has private constructors and is minted only
 after comparing **the complete byte stream** to the BLAKE3 root in an
