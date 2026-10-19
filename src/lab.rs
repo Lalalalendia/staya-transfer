@@ -87,7 +87,7 @@ pub fn fetch_complete<S: RangeSource, C: Cancellation>(
     if sources.is_empty() || sources.len() > budget.max_sources {
         return Err(TransferError::InvalidBudget);
     }
-    let request_count = 1 + (manifest.size - 1) / budget.max_inflight_bytes;
+    let request_count = manifest.size.div_ceil(budget.max_inflight_bytes);
     if request_count > MAX_LAB_RANGES {
         return Err(TransferError::InvalidBudget);
     }
