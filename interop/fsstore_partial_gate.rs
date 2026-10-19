@@ -23,8 +23,8 @@ use std::{
 };
 
 const LEN: usize = 8 * 1024 * 1024 + 17;
-const START: u64 = 33_333;
-const END: u64 = 200_111;
+const START: u64 = 32_768;
+const END: u64 = 196_608;
 const TIMEOUT: Duration = Duration::from_secs(90);
 const BLOCK: BlockSize = BlockSize::from_chunk_log(4);
 
@@ -72,6 +72,11 @@ async fn pinned_partial_import_clean_reopen_with_physical_bao_audit() {
         let (identity, wire) = prepare(&payload);
         let hash = Hash::from_bytes(identity.manifest.id.0);
         let store = FsStore::load(&root).await.expect("real pinned FsStore");
+
+        // Reject even *cryptographically valid* subrange requests that do not
+        // form complete Bao storage groups: they cannot yet be checkpointed.
+        let unaligned = ByteRange::new(33_333, 200_111, LEN as u64).unwrap();
+        assert!(stage_verified_fixture(&store, identity, unaligned, &wire).await.is_err());
 
         // Invalid caller profile/length/root/proof must fail BEFORE any FsStore import.
         let mut wrong_profile = identity;
