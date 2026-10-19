@@ -10,9 +10,9 @@ A BLAKE3 digest of a complete file does not authenticate arbitrary pieces of a p
 
 ## Selected mechanism
 
-- Use the synchronous Bao response verifier from bao-tree 0.16.0 with the 16 KiB block group configuration used in iroh-blobs 0.103.1. This validates each decoded leaf against the known full-object BLAKE3 root. Do not invent a second wire protocol.
+- Use the synchronous Bao response verifier from bao-tree 0.16.1 with the 16 KiB block group configuration used in iroh-blobs 0.103.1. This validates each decoded leaf against the known full-object BLAKE3 root. Do not invent a second wire protocol.
 - Pin the codec version in Cargo.toml and isolate the adapter behind feature flag bao. Cross-stack compatibility with the actual pinned fork remains unverified.
-- The manifest BLAKE3 root and object size are trusted inputs supplied only after higher-level authorization. A peer can suggest data but not select a trusted root or access policy.
+- The manifest BLAKE3 root and object size are trusted inputs supplied only after higher-level authorization. **A Bao proof for an interior subrange does not independently prove the complete object length.** Rejected metadata mismatches at the object tail are testable; length and identity must be fixed by trusted source metadata before accepting proofs. A peer can suggest data but not select a trusted root or access policy.
 - Decode a single requested byte range. Require exact contiguous byte coverage, decode success, no trailing bytes, and matching full-object identity. Reject mismatched size, wrong root, corrupted proof, truncation or excessively large data.
 - Bound requested output to 1 MiB, proof input to 2 MiB, and bytes retained in one in-memory checkpoint to 8 MiB. These limits are *in addition* to admission/transport/backpressure limits required by later adapters.
 - VerifiedBaoRange has private fields, constructed only by proof decoding. VerifiedCheckpoint checks same manifest root and size before holding authenticated bytes and marking those intervals available for skip/resume planning. The checkpoint retains the bytes; it does not mark bytes present without retaining them.
@@ -33,5 +33,9 @@ Unit tests cover valid unaligned ranges, bad root of equal file size, flipped co
 ## Upstream evidence
 
 - [iroh-blobs 0.103.1 get and proof handling](https://github.com/Lalalalendia/iroh-blobs/blob/main/src/get.rs)
-- [bao-tree 0.16 verification API](https://docs.rs/bao-tree/0.16.0/bao_tree/io/sync/index.html)
+- [bao-tree 0.16 verification API](https://docs.rs/bao-tree/0.16.1/bao_tree/io/sync/index.html)
 - [STY-MASTER-PLAN-02](https://app.notion.com/p/3fe32a84beec81e5acf7c081fe5e0bfd)
+
+## Pinned compatibility observation (19 Oct 2026)
+
+The inspected fork [Lalalalendia/iroh-blobs](https://github.com/Lalalalendia/iroh-blobs) at commit `a8f5b65d3e4ae0be7d9be7907458b9f1fd56aefa` resolves `bao-tree 0.16.1`, `iroh 1.3.0`, `noq 1.3.0` and `blake3 1.8.7`. Staya Transfer pins only `bao-tree 0.16.1` with a separate `blake3 1.8.5` contract and does not yet link the transport fork. The fork declares Rust 1.91 while this core crate declares 1.85. Exact-source Bao wire A/B and compiler-feature matrix are release gates, not completed validations.
