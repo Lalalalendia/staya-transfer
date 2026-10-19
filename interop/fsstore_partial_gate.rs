@@ -516,3 +516,66 @@ async fn real_fsstore_supervised_quiescence_blocks_early_handoff_and_reaudits_ba
     .await
     .expect("bounded real FsStore actor shutdown fixture");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit() {
+    // Test the fail-closed emergency path in a disposable INDEPENDENT
+    // subprocess. Intentional custody leakage cannot contaminate unrelated
+    // test cases, and process exit must release the leaked OS handle.
+    const MARKER: &str = "STY_G2_05H2_ABANDONED_ACTOR_HOLD";
+    if let Some(root) = std::env::var_os("STY_G2_05H2_ABANDON_CHILD_ROOT") {
+        let root = std::path::PathBuf::from(root);
+        let active = ActiveFsStore::open(
+            &root,
+            Limits {
+                max_partial_objects: 1,
+                max_reserved_bytes: 4096,
+                max_open_handles: 4,
+                max_retries_per_object: 1,
+            },
+        )
+        .await
+        .expect("child starts real FsStore under OS custody");
+        // No successful actor shutdown has occurred. Dropping must HOLD the
+        // original OS lease despite the actor object being abandoned.
+        drop(active);
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock
+            ),
+            "prematurely dropped active actor must not enable a new writer"
+        );
+        println!("{MARKER} custody_retained=true");
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "staya-g2-05h2-abandon-parent-{}",
+        std::process::id()
+    ));
+    assert!(!root.exists(), "only use a fresh private root");
+    fs::create_dir(&root).expect("private test root");
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit")
+        .arg("--nocapture")
+        .env("STY_G2_05H2_ABANDON_CHILD_ROOT", &root)
+        .output()
+        .expect("run OS-independent actor-abandon test child");
+    let output = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.status.success() && output.contains(MARKER),
+        "abandoned-actor subprocess: stdout={output} stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    // Killing/exiting the OS process ultimately closes its handles. No
+    // journal claim, bytes reuse or filesystem durability is inferred.
+    let owner = StoreLease::acquire(&root)
+        .expect("a new process may reacquire after the abandoned process exits");
+    drop(owner);
+    fs::remove_dir_all(&root).expect("dispose private fixture");
+    println!(
+        "STY_G2_05H2_ABANDON_RECOVERY real_process=true lock_held_before_exit=true reacquire_after_exit=true durable_receipt=false"
+    );
+}
