@@ -216,9 +216,13 @@ mod tests {
     }
 
     #[test]
-    fn incorrect_size_or_empty_proof_cannot_mint_verified_bytes() {
+    fn tail_size_mismatch_or_empty_proof_cannot_mint_verified_bytes() {
         let data = sample_data();
-        let (mut req, encoded) = fixture(&data, 1024..21000);
+        let end = data.len() as u64;
+        // A partial interior proof is not a separate proof of TOTAL file
+        // length: root+size must come from authorized manifest metadata.
+        // Include the final leaf to test wrong-length rejection directly.
+        let (mut req, encoded) = fixture(&data, end - 20000..end);
         assert!(matches!(
             verify_bao_range(&req, &[]),
             Err(TransferError::CorruptData)
