@@ -52,7 +52,9 @@ fn parse_name(name: &str) -> io::Result<&str> {
         .ok_or_else(|| invalid("unrecognized partial object filename"))?;
     if !matches!(suffix, "data" | "obao4" | "sizes4" | "bitfield")
         || stem.len() != 64
-        || !stem.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || !stem
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
         return Err(invalid("unsupported pinned FsStore partial filename"));
     }
@@ -106,8 +108,9 @@ pub fn inspect_quiescent_partial_files(
             if roots.len() >= limits.max_objects {
                 return Err(invalid("quiescent FsStore object quota exceeded"));
             }
-            roots.try_reserve(1)
-                .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "object count allocation"))?;
+            roots.try_reserve(1).map_err(|_| {
+                io::Error::new(io::ErrorKind::OutOfMemory, "object count allocation")
+            })?;
             roots.insert(stem.to_owned());
         }
         logical_bytes = logical_bytes

@@ -2,20 +2,20 @@
 //! The /dev/full test exercises a real OS write failure at the audit callback,
 //! NOT a full-disk write inside the upstream FsStore actor.
 
+#[cfg(target_os = "linux")]
+use staya_custody_lab::partial_barrier::{PartialPaths, publish_after_quiescent_audit};
 use staya_custody_lab::{
     StoreLease,
     checkpoint::{CheckpointClaim, IROH_PREORDER_16K, read_candidates},
     disk_budget::{DiskLimits, inspect_quiescent_partial_files},
 };
 #[cfg(target_os = "linux")]
-use staya_custody_lab::partial_barrier::{PartialPaths, publish_after_quiescent_audit};
+use std::io::Write;
 use std::{
     fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-#[cfg(target_os = "linux")]
-use std::io::Write;
 
 const ROOT: [u8; 32] = [0x61; 32];
 
@@ -24,10 +24,7 @@ fn private_root() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "staya-g2-05g-{}-{nonce}",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("staya-g2-05g-{}-{nonce}", std::process::id()));
     fs::create_dir(&path).unwrap();
     fs::create_dir(path.join("data")).unwrap();
     path
@@ -72,7 +69,10 @@ fn quiescent_snapshot_refuses_excess_length_and_unknown_entries() {
         ..disk_limits()
     };
     assert!(inspect_quiescent_partial_files(&owner, denied_count).is_err());
-    assert_eq!(inspect_quiescent_partial_files(&owner, disk_limits()).unwrap(), snapshot);
+    assert_eq!(
+        inspect_quiescent_partial_files(&owner, disk_limits()).unwrap(),
+        snapshot
+    );
     fs::write(root.join("data").join("unrecognized.tmp"), b"blocked").unwrap();
     assert!(inspect_quiescent_partial_files(&owner, disk_limits()).is_err());
     drop(owner);
@@ -91,7 +91,10 @@ fn partial_directory_symlink_refused_without_reading_external_content() {
     fs::remove_file(&extra).unwrap();
     symlink(root.join("external-protected"), &extra).unwrap();
     assert!(inspect_quiescent_partial_files(&owner, disk_limits()).is_err());
-    assert_eq!(fs::read(root.join("external-protected")).unwrap(), b"important");
+    assert_eq!(
+        fs::read(root.join("external-protected")).unwrap(),
+        b"important"
+    );
     drop(owner);
     fs::remove_dir_all(root).unwrap();
 }
