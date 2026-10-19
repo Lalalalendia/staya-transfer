@@ -1,0 +1,43 @@
+name: STY-G2 cooperative writer custody
+on:
+  pull_request:
+    paths:
+      - 'custody/**'
+      - '.github/workflows/g2-custody.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'custody/**'
+      - '.github/workflows/g2-custody.yml'
+permissions:
+  contents: read
+concurrency:
+  group: g2-custody-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  os-writer-custody:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # Bootstrap only. Replace with committed exact Cargo.lock + --locked.
+      - name: Resolve independent custody dependencies
+        shell: bash
+        run: |
+          cargo generate-lockfile --manifest-path custody/Cargo.toml
+          echo STY_G2_CUSTODY_LOCK_BEGIN
+          cat custody/Cargo.lock
+          echo STY_G2_CUSTODY_LOCK_END
+      - name: Format gate
+        run: cargo fmt --manifest-path custody/Cargo.toml --all -- --check
+      - name: OS-process ownership, hardlink and kill regression tests
+        run: cargo test --manifest-path custody/Cargo.toml --locked --all-targets -- --nocapture
+      - name: Rust Clippy deny warnings
+        run: cargo clippy --manifest-path custody/Cargo.toml --locked --all-targets -- -D warnings
