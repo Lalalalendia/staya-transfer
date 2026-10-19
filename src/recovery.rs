@@ -66,17 +66,14 @@ pub enum ReopenAction {
 ///
 /// This pure function performs NO disk access and NEVER permits skipped bytes.
 /// Its caller must have authenticated the expected manifest independently.
-pub fn decide_reopen(
-    expected: StoreIdentity,
-    observed: ReopenObservation,
-) -> ReopenAction {
+pub fn decide_reopen(expected: StoreIdentity, observed: ReopenObservation) -> ReopenAction {
     use BaoStorageProfile::IrohBlobs0103PreOrder16KiB as Supported;
+    use RecoveryFault as Fault;
     use ReopenAction::{AuditPhysicalDataAndBao, Hold, InitializePrivateStaging};
     use ReopenObservation::{
-        CorruptCheckpoint, FreshPrivateStore, IncompleteCheckpoint, MissingData,
-        MissingOutboard, PublishedCheckpoint, WriterAlreadyActive,
+        CorruptCheckpoint, FreshPrivateStore, IncompleteCheckpoint, MissingData, MissingOutboard,
+        PublishedCheckpoint, WriterAlreadyActive,
     };
-    use RecoveryFault as Fault;
 
     if expected.profile != Supported {
         return Hold(Fault::UnsupportedProfile);
@@ -151,11 +148,23 @@ mod tests {
     fn interrupted_or_corrupted_records_never_become_verified_ranges() {
         let expected = identity(7, 4096);
         for (observation, fault) in [
-            (ReopenObservation::IncompleteCheckpoint, RecoveryFault::IncompleteCheckpoint),
-            (ReopenObservation::CorruptCheckpoint, RecoveryFault::CorruptCheckpoint),
+            (
+                ReopenObservation::IncompleteCheckpoint,
+                RecoveryFault::IncompleteCheckpoint,
+            ),
+            (
+                ReopenObservation::CorruptCheckpoint,
+                RecoveryFault::CorruptCheckpoint,
+            ),
             (ReopenObservation::MissingData, RecoveryFault::MissingData),
-            (ReopenObservation::MissingOutboard, RecoveryFault::MissingOutboard),
-            (ReopenObservation::WriterAlreadyActive, RecoveryFault::WriterAlreadyActive),
+            (
+                ReopenObservation::MissingOutboard,
+                RecoveryFault::MissingOutboard,
+            ),
+            (
+                ReopenObservation::WriterAlreadyActive,
+                RecoveryFault::WriterAlreadyActive,
+            ),
         ] {
             assert_eq!(
                 decide_reopen(expected, observation),
