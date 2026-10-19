@@ -1,18 +1,44 @@
 # Staya Transfer
 
-Transport-independent, resumable and bounded transfer of content-addressed byte objects for the Staya network. Initial phase: a small Rust library with explicit transfer contracts and tests; not a deployed sync service.
+Transport-independent, resumable and bounded transfer of content-addressed
+byte objects for the Staya network. This repository is a standalone Rust
+library, **not a deployed sync service**.
 
-## Boundaries
+## Component boundaries
 
-- `noq` provides QUIC packet/stream semantics, and `roha` provides secure peer connections, discovery, NAT traversal and relay paths.
-- This repository schedules immutable blob ranges, verifies returned bytes through an explicit verifier/adapter, manages resumable transfer checkpoints, source selection and budgets. `iroh-blobs` is a candidate implementation of the Bao/BLAKE3 transfer and streaming adapter; it is not silently vendored here.
-- `WOW` handles protected short events, envelope delivery and signed receipts independently.
-- Akula owns user/device ACL, revision DAG, sync, File Gate and durability acknowledgements. **Receiving bytes never authorizes modifying a user document.**
+- `noq` provides QUIC stream and packet behavior.
+- `roha` provides authenticated peer connectivity, discovery, NAT traversal,
+  relay routing and network limits.
+- This repository owns the **transfer contract**: immutable content manifests,
+  bounded scheduling, sources, cancellation and verification outcomes.
+- `iroh-blobs` is the preferred Bao/BLAKE3 transfer and resumable store
+  backend; its source remains external and is not vendored here.
+- `WOW` sends separately authorized small envelopes and receipts.
+- **Akula alone** owns user/device ACL, revision DAG, File Gate, conflicts,
+  history and durable application. A QUIC ACK or BLAKE3 match NEVER permits
+  modifying a user document.
 
-## Status
+## STY-G1 status
 
-Bootstrap only. No working peer-to-peer file transfer or production integration yet. See the [Staya master plan](https://app.notion.com/p/3fe32a84beec81e5acf7c081fe5e0bfd) and the [feature catalogue](https://app.notion.com/p/3fe32a84beec81498edde0237851cf5d).
+- Base contracts: `Manifest`, `ContentId`, `ByteRange`, `TransferBudget`.
+- `lab::fetch_complete`: bounded in-memory mock with whole-object BLAKE3,
+  limited source attempts and cancellation. Bad or incomplete bytes are never
+  published as a verified object.
+- All network and filesystem interactions are **intentionally absent**.
+- This is not a working P2P transfer, persistent resume, or safe Akula sync.
+- See [ADR-0001](docs/ADR-0001-sty-g1-boundaries.md) for risks and next gates.
 
 ## Development
 
-A dedicated Rust crate and CI are the first milestone. Releases must pin and test Roha, noq and the selected blob backend by immutable commit SHA; do not trust floating upstream dependencies or treat a network ACK as a durable Akula commit.
+Rust 1.85 or newer, edition 2024.
+
+```sh
+cargo fmt --all -- --check
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+```
+
+Pin exact upstream commit SHAs and Cargo.lock before adding production
+adapters. Do not silently switch `iroh-blobs` v0.103.1 to fork `main`.
+Development plan: [STY-MASTER-PLAN-02](https://app.notion.com/p/3fe32a84beec81e5acf7c081fe5e0bfd);
+[canonical feature catalogue](https://app.notion.com/p/3fe32a84beec81498edde0237851cf5d).
