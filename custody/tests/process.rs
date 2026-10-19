@@ -160,7 +160,7 @@ fn repeated_drop_and_reacquire_has_no_stale_lock_descriptor() {
             );
         }
     }
-    println!("STY_G2_05C_CUSTODY_STRESS cycles=128 cross_process_checks=8 success=true");
+    println!("STY_G2_05D_CUSTODY_STRESS cycles=128 cross_process_checks=8 success=true");
     fs::remove_dir_all(root).unwrap();
 }
 
