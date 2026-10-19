@@ -88,7 +88,8 @@ fn encode(claim: CheckpointClaim) -> [u8; RECORD_BYTES] {
     out[56..60].copy_from_slice(&claim.bao_profile.to_le_bytes());
     out[60..68].copy_from_slice(&claim.start.to_le_bytes());
     out[68..76].copy_from_slice(&claim.end.to_le_bytes());
-    out[PAYLOAD_BYTES..].copy_from_slice(blake3::hash(&out[..PAYLOAD_BYTES]).as_bytes());
+    let checksum = *blake3::hash(&out[..PAYLOAD_BYTES]).as_bytes();
+    out[PAYLOAD_BYTES..].copy_from_slice(&checksum);
     out
 }
 
