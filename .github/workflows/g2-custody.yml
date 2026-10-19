@@ -27,14 +27,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      # Bootstrap only. Replace with committed exact Cargo.lock + --locked.
-      - name: Resolve independent custody dependencies
-        shell: bash
-        run: |
-          cargo generate-lockfile --manifest-path custody/Cargo.toml
-          echo STY_G2_CUSTODY_LOCK_BEGIN
-          cat custody/Cargo.lock
-          echo STY_G2_CUSTODY_LOCK_END
+      - name: Enforce committed cross-platform Cargo.lock
+        run: cargo metadata --manifest-path custody/Cargo.toml --locked --format-version 1 > /dev/null
       - name: Format gate
         run: cargo fmt --manifest-path custody/Cargo.toml --all -- --check
       - name: OS-process ownership, hardlink and kill regression tests
