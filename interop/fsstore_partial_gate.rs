@@ -523,6 +523,23 @@ async fn real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit() {
     // subprocess. Intentional custody leakage cannot contaminate unrelated
     // test cases, and process exit must release the leaked OS handle.
     const MARKER: &str = "STY_G2_05H2_ABANDONED_ACTOR_HOLD";
+    const OPEN_MARKER: &str = "STY_G2_05H2_ABANDONED_OPEN_HOLD";
+    if let Some(root) = std::env::var_os("STY_G2_05H2_OPEN_CHILD_ROOT") {
+        let root = std::path::PathBuf::from(root);
+        // Simulate cancellation after acquiring the opening lease. This
+        // tests the opening guard's Drop, NOT a real interrupted actor load.
+        shutdown_supervisor::simulate_cancelled_open_for_test(&root)
+            .expect("cancelled opening lease must remain held");
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock
+            ),
+            "cancelled opening may not admit another writer"
+        );
+        println!("{OPEN_MARKER} custody_retained=true");
+        return;
+    }
     if let Some(root) = std::env::var_os("STY_G2_05H2_ABANDON_CHILD_ROOT") {
         let root = std::path::PathBuf::from(root);
         let active = ActiveFsStore::open(
@@ -574,8 +591,24 @@ async fn real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit() {
     let owner = StoreLease::acquire(&root)
         .expect("a new process may reacquire after the abandoned process exits");
     drop(owner);
+    let cancelled_open = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit")
+        .arg("--nocapture")
+        .env("STY_G2_05H2_OPEN_CHILD_ROOT", &root)
+        .output()
+        .expect("run independent simulated opening-cancellation child");
+    let open_output = String::from_utf8_lossy(&cancelled_open.stdout);
+    assert!(
+        cancelled_open.status.success() && open_output.contains(OPEN_MARKER),
+        "cancelled opening subprocess: stdout={open_output} stderr={}",
+        String::from_utf8_lossy(&cancelled_open.stderr)
+    );
+    let after_open = StoreLease::acquire(&root)
+        .expect("OS process exit must release intentionally leaked opening custody");
+    drop(after_open);
     fs::remove_dir_all(&root).expect("dispose private fixture");
     println!(
-        "STY_G2_05H2_ABANDON_RECOVERY real_process=true lock_held_before_exit=true reacquire_after_exit=true durable_receipt=false"
+        "STY_G2_05H2_ABANDON_RECOVERY real_process=true lock_held_before_exit=true cancelled_opening_guard=true reacquire_after_exit=true durable_receipt=false"
     );
 }
