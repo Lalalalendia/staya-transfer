@@ -59,6 +59,9 @@ pub struct Admission {
     // Each release must match a previously admitted *whole* reservation.
     // Without this, releasing fabricated partial resource counts corrupts quotas.
     outstanding: Vec<Reservation>,
+    // One-way process-local admission gate: once shutdown begins, no new
+    // permit may be issued from any SharedAdmission clone.
+    accepting: bool,
 }
 
 impl Admission {
@@ -72,10 +75,17 @@ impl Admission {
                 handles: 0,
             },
             outstanding: Vec::new(),
+            accepting: true,
         })
     }
 
     pub fn reserve(&mut self, request: Reservation) -> io::Result<()> {
+        if !self.accepting {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "new partial-store admission denied during shutdown",
+            ));
+        }
         let objects = self.used.objects.checked_add(request.objects);
         let bytes = self.used.bytes.checked_add(request.bytes);
         let handles = self.used.handles.checked_add(request.handles);
@@ -142,8 +152,20 @@ impl Admission {
         Ok(())
     }
 
+    /// Atomically stop admitting new work. Already-issued permits must drain.
+    /// This transition is one-way: it cannot re-open a closing store.
+    pub fn stop_admissions(&mut self) {
+        self.accepting = false;
+    }
+
+    /// Only the local reservation ledger has drained. This does NOT prove
+    /// FsStore's actor, kernel writes, or fork-inherited children have stopped.
+    pub fn admissions_drained(&self) -> bool {
+        !self.accepting && self.outstanding.is_empty() && self.usage() == (0, 0, 0)
+    }
+
     pub fn retry_allowed(&self, failures_so_far: u32) -> bool {
-        failures_so_far < self.limits.max_retries_per_object
+        self.accepting && failures_so_far < self.limits.max_retries_per_object
     }
 
     pub fn usage(&self) -> (u32, u64, u32) {
@@ -179,6 +201,29 @@ impl SharedAdmission {
             ledger: std::sync::Arc::clone(&self.inner),
             reserved: request,
         })
+    }
+
+    /// Linearizable with reserve(): closure and reservation share one mutex.
+    /// A concurrent reservation either precedes this call and remains counted
+    /// by a live permit, or is denied. Closing can never be reversed.
+    pub fn stop_admissions(&self) -> io::Result<()> {
+        let mut ledger = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("resource ledger poisoned"))?;
+        ledger.stop_admissions();
+        Ok(())
+    }
+
+    /// Local permits are drained after shutdown begins. NOT an authority
+    /// to release the OS lock: real FsStore shutdown and child-writer join
+    /// still need independent confirmation.
+    pub fn admissions_drained(&self) -> io::Result<bool> {
+        let ledger = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("resource ledger poisoned"))?;
+        Ok(ledger.admissions_drained())
     }
 
     pub fn usage(&self) -> io::Result<(u32, u64, u32)> {
@@ -228,6 +273,58 @@ mod tests {
             max_reserved_bytes: 1024,
             max_open_handles: 4,
             max_retries_per_object: 3,
+        }
+    }
+
+    #[test]
+    fn closing_gate_denies_all_new_admissions_and_drains_issued_permits() {
+        let shared = SharedAdmission::new(limits()).unwrap();
+        let request = Reservation::new(1, 128, 1).unwrap();
+        let permit = shared.reserve(request).unwrap();
+        let from_other_thread = shared.clone();
+        assert!(!shared.admissions_drained().unwrap());
+        shared.stop_admissions().unwrap();
+        // Closing is idempotent, but NEVER grants permission to reopen.
+        shared.stop_admissions().unwrap();
+        assert!(!shared.admissions_drained().unwrap());
+        std::thread::spawn(move || {
+            assert!(from_other_thread.reserve(request).is_err());
+            assert!(!from_other_thread.retry_allowed(0).unwrap());
+        })
+        .join()
+        .unwrap();
+        assert_eq!(shared.usage().unwrap(), (1, 128, 1));
+        drop(permit);
+        assert!(shared.admissions_drained().unwrap());
+        assert!(shared.reserve(request).is_err());
+        assert_eq!(shared.usage().unwrap(), (0, 0, 0));
+    }
+
+    #[test]
+    fn closing_gate_race_never_discards_an_admitted_permit() {
+        use std::sync::{Arc, Barrier};
+        let request = Reservation::new(1, 128, 1).unwrap();
+        // Run independently to cover both lock-acquisition orders. Either
+        // admission precedes shutdown and is tracked, or it is rejected.
+        for _ in 0..64 {
+            let shared = SharedAdmission::new(limits()).unwrap();
+            let other = shared.clone();
+            let barrier = Arc::new(Barrier::new(2));
+            let thread_barrier = Arc::clone(&barrier);
+            let contender = std::thread::spawn(move || {
+                thread_barrier.wait();
+                other.reserve(request)
+            });
+            barrier.wait();
+            shared.stop_admissions().unwrap();
+            let attempted = contender.join().unwrap();
+            if let Ok(permit) = attempted {
+                assert!(!shared.admissions_drained().unwrap());
+                assert_eq!(shared.usage().unwrap(), (1, 128, 1));
+                drop(permit);
+            }
+            assert!(shared.admissions_drained().unwrap());
+            assert!(shared.reserve(request).is_err());
         }
     }
 
