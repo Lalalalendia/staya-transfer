@@ -1,0 +1,20 @@
+[package]
+name = "staya-iroh-fork-quic"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[[test]]
+name = "quic_get"
+path = "../quic_get.rs"
+
+[dependencies]
+staya-transfer = { path = "../..", features = ["bao"] }
+bao-tree = { version = "=0.16.1", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+iroh = { version = "=1.3.0", default-features = false }
+iroh-blobs = { git = "https://github.com/Lalalalendia/iroh-blobs", rev = "a8f5b65d3e4ae0be7d9be7907458b9f1fd56aefa", default-features = false, features = ["fs-store"] }
