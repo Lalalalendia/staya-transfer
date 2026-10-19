@@ -613,7 +613,6 @@ async fn real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit() {
     );
 }
 
-
 /// G2-05h3a: The parent holds only an OS child-process handle. The child
 /// starts the *real* pinned FsStore under its own exclusive StoreLease AFTER
 /// exec, so the launcher never holds a lock file description that fork may
@@ -675,7 +674,11 @@ async fn real_fsstore_os_process_supervisor_clean_and_kill() {
         })
         .await
         .expect("stdin reader task");
-        assert_eq!(command.trim(), "CLOSE", "only explicit clean close admitted");
+        assert_eq!(
+            command.trim(),
+            "CLOSE",
+            "only explicit clean close admitted"
+        );
         let closing = active
             .begin_closing()
             .unwrap_or_else(|(_, e)| panic!("child cannot enter closing: {e}"));
@@ -822,8 +825,7 @@ async fn real_fsstore_os_process_supervisor_clean_and_kill() {
         }
         // The whole OS process (and all its Tokio actor threads) is gone.
         // Obtain the *next* independent lease before inspecting any bytes.
-        let owner =
-            StoreLease::acquire(&root).expect("post-join OS custody must be reacquirable");
+        let owner = StoreLease::acquire(&root).expect("post-join OS custody must be reacquirable");
         let payload = make_data();
         let (identity, _) = prepare(&payload);
         assert!(

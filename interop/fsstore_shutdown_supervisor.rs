@@ -54,8 +54,10 @@ pub fn simulate_cancelled_open_for_test(root: &Path) -> Result<(), String> {
 pub struct ActiveFsStore {
     // Option permits a clean, proof-carrying transition to Quiescent without
     // allowing an unexpected Drop to close custody while the actor may live.
-    owner: Option<StoreLease>,
-    actor: Option<FsStore>,
+    // Indirect ownership keeps the state-transition error payload small on
+    // both Linux and Windows, without losing the live OS custody on failure.
+    owner: Option<Box<StoreLease>>,
+    actor: Option<Box<FsStore>>,
     admissions: SharedAdmission,
 }
 
@@ -68,11 +70,11 @@ impl Drop for ActiveFsStore {
         //
         // Intentional fail-closed resource leak, experimental only. Production
         // must add a supervised abort/join path to eventually reclaim it.
-        if self.actor.is_some() {
-            if let Some(owner) = self.owner.take() {
-                eprintln!("STY_G2_05H2_ABANDONED_ACTIVE_ACTOR custody_retained_until_exit=true");
-                std::mem::forget(owner);
-            }
+        if self.actor.is_some()
+            && let Some(owner) = self.owner.take()
+        {
+            eprintln!("STY_G2_05H2_ABANDONED_ACTIVE_ACTOR custody_retained_until_exit=true");
+            std::mem::forget(owner);
         }
     }
 }
@@ -113,8 +115,8 @@ impl ActiveFsStore {
         .map_err(|e| format!("load real pinned FsStore: {e}"))?;
         let owner = opening.owner.take().expect("opening custody invariant");
         Ok(Self {
-            owner: Some(owner),
-            actor: Some(actor),
+            owner: Some(Box::new(owner)),
+            actor: Some(Box::new(actor)),
             admissions,
         })
     }
@@ -209,7 +211,7 @@ impl ClosingFsStore {
         let ClosingFsStore { mut active } = self;
         let actor = active.actor.take().expect("shutdown actor invariant");
         drop(actor);
-        let owner = active.owner.take().expect("shutdown custody invariant");
+        let owner = *active.owner.take().expect("shutdown custody invariant");
         let admissions = active.admissions.clone();
         Ok(QuiescentFsStore { owner, admissions })
     }
