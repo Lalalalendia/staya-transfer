@@ -42,3 +42,8 @@ G2-04a implements (4) metadata only and fail-closed parsing in (5); (1), (2), (3
 5. PR remains Draft until exact-HEAD CI. Do NOT mark G2-04 whole task completed or enable Akula File Gate on this result.
 
 Next: G2-04b real FsStore storage barriers, physical readback and durable actor integration. Then G2-05 killpoint and quota matrix on Windows/Linux, G2-06 independent final acceptance.
+
+
+## STY-G2-05b additional checkpoint orphan quotas (isolated lab)
+
+Prior G2-04a left `.staya-cp-tmp-*` interruption files unbounded: they were ignored (correct for trust) but unlimited in number, size and directory scanning. STY-G2-05b adds fail-closed bounds: up to 32 pending records each at most the fixed 108-byte record length, and at most 512 top-level private root entries scanned per call. Unexpected symlink/reparse or directory types under the reserved temp prefix fail closed. The reader still ignores legitimate torn temp *for content trust only*, but refuses to publish new checkpoint claims when temporary files exhaust these quotas. A separate, explicit `cleanup_pending_records` is available solely with the cooperative OS `StoreLease` held and the checkpoint writer **quiescent**. The routine checks all pending records before deleting any; on Unix it syncs the directory after unlinking. It never deletes user files, published checkpoint generations or FsStore `data` contents. No automatic deletion is triggered by read or publication. The cleanup is **not** safe against a malicious simultaneous rename/link-swap by a process ignoring locks; stronger descriptor-relative custody and Windows directory durability remain unsolved. Limits do not yet apply to actual FsStore object bytes or other process resources; G2-05 cannot be closed from this sub-gate.

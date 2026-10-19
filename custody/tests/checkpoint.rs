@@ -206,3 +206,109 @@ fn no_claim_may_be_added_when_store_ownership_is_lost() {
     drop(lease);
     fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn cleanup_unpublished_pending_names_only_and_requires_uncontested_owner() {
+    let path = root("orphan-clean");
+    let lease = StoreLease::acquire(&path).unwrap();
+    publish_candidate(&lease, claim(1)).unwrap();
+    let temp_a = path.join(".staya-cp-tmp-0001-partial");
+    let temp_b = path.join(".staya-cp-tmp-0002-partial");
+    fs::write(&temp_a, b"torn").unwrap();
+    fs::write(&temp_b, b"").unwrap();
+    fs::write(path.join("do-not-remove.txt"), b"ordinary file").unwrap();
+    assert_eq!(candidates(&lease), vec![claim(1)]);
+    let refused = Command::new(env!("CARGO_BIN_EXE_staya-custody-worker"))
+        .arg("probe")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&refused.stdout).trim(), "BUSY");
+    let cleaned = staya_custody_lab::checkpoint::cleanup_pending_records(&lease).unwrap();
+    assert_eq!(cleaned.removed, 2);
+    assert_eq!(cleaned.bytes, 4);
+    assert!(!temp_a.exists() && !temp_b.exists());
+    assert_eq!(
+        fs::read(path.join("do-not-remove.txt")).unwrap(),
+        b"ordinary file"
+    );
+    assert_eq!(candidates(&lease), vec![claim(1)]);
+    drop(lease);
+    let reopened = StoreLease::acquire(&path).unwrap();
+    assert_eq!(candidates(&reopened), vec![claim(1)]);
+    assert_eq!(
+        staya_custody_lab::checkpoint::cleanup_pending_records(&reopened)
+            .unwrap()
+            .removed,
+        0
+    );
+    drop(reopened);
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn oversized_unpublished_temp_fails_closed_without_removing_anything() {
+    let path = root("orphan-size");
+    let lease = StoreLease::acquire(&path).unwrap();
+    let oversized = path.join(".staya-cp-tmp-oversized");
+    fs::write(&oversized, vec![0x7d; 109]).unwrap();
+    assert!(read_candidates(&lease, ROOT, SIZE, IROH_PREORDER_16K).is_err());
+    assert!(publish_candidate(&lease, claim(1)).is_err());
+    assert!(staya_custody_lab::checkpoint::cleanup_pending_records(&lease).is_err());
+    assert_eq!(fs::metadata(&oversized).unwrap().len(), 109);
+    assert!(!path.join(name(1)).exists());
+    fs::remove_file(oversized).unwrap();
+    publish_candidate(&lease, claim(1)).unwrap();
+    drop(lease);
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn pending_count_limit_denies_all_checkpoint_publication() {
+    use staya_custody_lab::checkpoint::MAX_PENDING_CLAIMS;
+    let path = root("orphan-count");
+    let lease = StoreLease::acquire(&path).unwrap();
+    for n in 0..=MAX_PENDING_CLAIMS {
+        fs::write(path.join(format!(".staya-cp-tmp-{n:04}")), b"").unwrap();
+    }
+    assert!(read_candidates(&lease, ROOT, SIZE, IROH_PREORDER_16K).is_err());
+    assert!(publish_candidate(&lease, claim(1)).is_err());
+    assert!(staya_custody_lab::checkpoint::cleanup_pending_records(&lease).is_err());
+    assert!(!path.join(name(1)).exists());
+    fs::remove_file(path.join(format!(".staya-cp-tmp-{MAX_PENDING_CLAIMS:04}"))).unwrap();
+    let cleaned = staya_custody_lab::checkpoint::cleanup_pending_records(&lease).unwrap();
+    assert_eq!(cleaned.removed, MAX_PENDING_CLAIMS);
+    publish_candidate(&lease, claim(1)).unwrap();
+    drop(lease);
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn root_directory_scan_quota_is_bounded_even_for_unrelated_files() {
+    use staya_custody_lab::checkpoint::MAX_ROOT_ENTRIES;
+    let path = root("orphan-scan");
+    let lease = StoreLease::acquire(&path).unwrap();
+    for n in 0..MAX_ROOT_ENTRIES {
+        fs::write(path.join(format!("unrelated-{n:04}.tmp")), b"").unwrap();
+    }
+    assert!(read_candidates(&lease, ROOT, SIZE, IROH_PREORDER_16K).is_err());
+    assert!(staya_custody_lab::checkpoint::cleanup_pending_records(&lease).is_err());
+    assert!(!path.join(name(1)).exists());
+    drop(lease);
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn pending_symlink_is_never_ignored_or_deleted() {
+    use std::os::unix::fs::symlink;
+    let path = root("orphan-symlink");
+    let lease = StoreLease::acquire(&path).unwrap();
+    fs::write(path.join("untouched"), b"important").unwrap();
+    symlink(path.join("untouched"), path.join(".staya-cp-tmp-evil")).unwrap();
+    assert!(read_candidates(&lease, ROOT, SIZE, IROH_PREORDER_16K).is_err());
+    assert!(staya_custody_lab::checkpoint::cleanup_pending_records(&lease).is_err());
+    assert_eq!(fs::read(path.join("untouched")).unwrap(), b"important");
+    drop(lease);
+    fs::remove_dir_all(path).unwrap();
+}
