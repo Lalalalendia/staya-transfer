@@ -124,11 +124,10 @@ impl Admission {
             .objects
             .checked_sub(request.objects)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "object quota underflow"))?;
-        let bytes = self
-            .used
-            .bytes
-            .checked_sub(request.bytes)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "byte quota underflow"))?;
+        let bytes =
+            self.used.bytes.checked_sub(request.bytes).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "byte quota underflow")
+            })?;
         let handles = self
             .used
             .handles
@@ -214,8 +213,16 @@ mod tests {
         admission.reserve(held).unwrap();
 
         // An attacker or buggy caller cannot release bytes/objects separately.
-        assert!(admission.release(Reservation::new(1, 1, 1).unwrap()).is_err());
-        assert!(admission.release(Reservation::new(1, 512, 1).unwrap()).is_err());
+        assert!(
+            admission
+                .release(Reservation::new(1, 1, 1).unwrap())
+                .is_err()
+        );
+        assert!(
+            admission
+                .release(Reservation::new(1, 512, 1).unwrap())
+                .is_err()
+        );
         assert_eq!(admission.usage(), (1, 512, 2));
 
         let more = Reservation::new(1, 512, 2).unwrap();
