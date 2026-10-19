@@ -100,7 +100,11 @@ fn decode(bytes: &[u8]) -> io::Result<CheckpointClaim> {
         return Err(invalid("checkpoint metadata checksum mismatch"));
     }
     let to_u64 = |pos: usize| -> u64 {
-        u64::from_le_bytes(bytes[pos..pos + 8].try_into().expect("checked fixed record"))
+        u64::from_le_bytes(
+            bytes[pos..pos + 8]
+                .try_into()
+                .expect("checked fixed record"),
+        )
     };
     let mut root = [0u8; 32];
     root.copy_from_slice(&bytes[16..48]);
@@ -129,7 +133,9 @@ fn validate_file(path: &Path) -> io::Result<()> {
         }
     }
     if meta.len() != RECORD_BYTES as u64 {
-        return Err(invalid("checkpoint physical byte length differs from record"));
+        return Err(invalid(
+            "checkpoint physical byte length differs from record",
+        ));
     }
     Ok(())
 }
@@ -164,7 +170,13 @@ pub fn read_candidates(
         let sequence = name
             .strip_prefix(PREFIX)
             .and_then(|s| s.strip_suffix(SUFFIX))
-            .and_then(|s| if s.len() == 16 { s.parse::<u64>().ok() } else { None })
+            .and_then(|s| {
+                if s.len() == 16 {
+                    s.parse::<u64>().ok()
+                } else {
+                    None
+                }
+            })
             .ok_or_else(|| invalid("unexpected checkpoint filename in private store"))?;
         if sequence == 0 || sequence > MAX_CLAIMS {
             return Err(invalid("checkpoint quota/sequence violated"));
@@ -199,7 +211,10 @@ pub fn read_candidates(
 /// Bao import and ensure its backend data/outboard is physically durable.
 /// G2-04b will connect those barriers and independently audit them.
 /// A failed post-rename barrier may leave a candidate; that never implies trust.
-pub fn publish_candidate(owner: &StoreLease, claim: CheckpointClaim) -> io::Result<MetadataBarrier> {
+pub fn publish_candidate(
+    owner: &StoreLease,
+    claim: CheckpointClaim,
+) -> io::Result<MetadataBarrier> {
     claim.validate()?;
     let existing = read_candidates(
         owner,
