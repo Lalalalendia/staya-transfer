@@ -612,3 +612,238 @@ async fn real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit() {
         "STY_G2_05H2_ABANDON_RECOVERY real_process=true lock_held_before_exit=true cancelled_opening_guard=true reacquire_after_exit=true durable_receipt=false"
     );
 }
+
+
+/// G2-05h3a: The parent holds only an OS child-process handle. The child
+/// starts the *real* pinned FsStore under its own exclusive StoreLease AFTER
+/// exec, so the launcher never holds a lock file description that fork may
+/// inherit. A clean handoff requires actor shutdown + child-process join.
+/// An abnormal termination requires kill + OS reap + independent new custody.
+/// This is an isolated integration LAB, not a production IPC protocol.
+#[tokio::test(flavor = "multi_thread")]
+async fn real_fsstore_os_process_supervisor_clean_and_kill() {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Child, Command, Stdio},
+        sync::mpsc,
+        thread,
+        time::{Instant, SystemTime, UNIX_EPOCH},
+    };
+
+    const READY_MARKER: &str = "STY_G2_05H3A_CHILD_READY";
+    const CLEAN_MARKER: &str = "STY_G2_05H3A_CHILD_CLEAN";
+
+    // The identical test binary runs inside a dedicated OS process. All
+    // actual FsStore actors and the OS lease live only in that process.
+    if let Some(root) = std::env::var_os("STY_G2_05H3A_CHILD_ROOT") {
+        let root = std::path::PathBuf::from(root);
+        let payload = make_data();
+        let (identity, wire) = prepare(&payload);
+        let required = range()
+            .len()
+            .checked_add(u64::try_from(wire.len()).unwrap())
+            .unwrap();
+        let active = ActiveFsStore::open(
+            &root,
+            Limits {
+                max_partial_objects: 1,
+                max_reserved_bytes: required,
+                max_open_handles: 4,
+                max_retries_per_object: 2,
+            },
+        )
+        .await
+        .expect("only child owns the FsStore and exclusive OS lease");
+        let cancel = AtomicBool::new(false);
+        let (_receipt, permit) = active
+            .stage(identity, range(), &wire, &cancel)
+            .await
+            .expect("child stages real authenticated Bao");
+        drop(permit);
+        println!("{READY_MARKER} actor_running=true lease_owned_by_child=true");
+        io::stdout().flush().unwrap();
+
+        // Do not close stdin in the parent until the clean/kill decision.
+        // Blocking IO is isolated from Tokio's actor threads.
+        let command = tokio::task::spawn_blocking(|| {
+            let mut line = String::new();
+            io::stdin()
+                .lock()
+                .read_line(&mut line)
+                .expect("supervisor command input");
+            line
+        })
+        .await
+        .expect("stdin reader task");
+        assert_eq!(command.trim(), "CLOSE", "only explicit clean close admitted");
+        let closing = active
+            .begin_closing()
+            .unwrap_or_else(|(_, e)| panic!("child cannot enter closing: {e}"));
+        let quiescent = closing
+            .finish()
+            .await
+            .unwrap_or_else(|(_, e)| panic!("actor shutdown must succeed: {e}"));
+        assert!(quiescent.admissions_drained().unwrap());
+        let checked = audit_clean_closed_fixture(&root, identity, range())
+            .expect("child physical Bao must authenticate after actual shutdown");
+        assert_eq!(checked, payload[START as usize..END as usize]);
+        assert!(
+            read_candidates(
+                quiescent.owner(),
+                identity.manifest.id.0,
+                identity.manifest.size,
+                IROH_PREORDER_16K,
+            )
+            .unwrap()
+            .is_empty(),
+            "no checkpoint claim from actor acceptance or shutdown alone"
+        );
+        quiescent.finish_clean(); // no LOCK_UN
+        println!("{CLEAN_MARKER} actor_shutdown=true bao_verified=true");
+        io::stdout().flush().unwrap();
+        return;
+    }
+
+    // A dedicated process owns the store; cancellation of its *parent* future
+    // must not create an abandoned actor/lease inside the long-lived parent.
+    // On abnormal close the supervisor must forcibly terminate and reap it.
+    struct ProcessGuard(Child);
+    impl Drop for ProcessGuard {
+        fn drop(&mut self) {
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+    fn await_exit(child: &mut Child) -> std::process::ExitStatus {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().expect("OS process wait") {
+                return status;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(50),
+                "FsStore worker failed to terminate; guard will kill/reap it"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    for clean in [true, false] {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "staya-g2-05h3a-process-{}-{unique}",
+            std::process::id()
+        ));
+        assert!(!root.exists(), "private root must never be preexisting");
+        fs::create_dir(&root).expect("create disposable store");
+        let mut child = ProcessGuard(
+            Command::new(std::env::current_exe().expect("same test executable"))
+                .arg("--exact")
+                .arg("real_fsstore_os_process_supervisor_clean_and_kill")
+                .arg("--nocapture")
+                .env("STY_G2_05H3A_CHILD_ROOT", &root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("launch dedicated real FsStore process"),
+        );
+        let stdout = child.0.stdout.take().expect("child process stdout");
+        let (tx, rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut captured = String::new();
+            for line in BufReader::new(stdout).lines() {
+                let line = line.expect("child output UTF-8");
+                if line.contains(READY_MARKER) {
+                    let _ = tx.send(());
+                }
+                captured.push_str(&line);
+                captured.push('\n');
+            }
+            captured
+        });
+        rx.recv_timeout(Duration::from_secs(70))
+            .expect("real child must stage Bao and publish READY marker");
+
+        // The parent has NOT acquired any store lock. The independently
+        // running writer process is the only OS owner, not a parent thread.
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock
+            ),
+            "second process cannot own an active child-owned FsStore"
+        );
+        if clean {
+            writeln!(
+                child.0.stdin.as_mut().expect("supervisor command channel"),
+                "CLOSE"
+            )
+            .expect("request clean actor shutdown");
+            child.0.stdin.take(); // EOF after CLOSE
+            assert!(
+                await_exit(&mut child.0).success(),
+                "clean worker must exit after actor shutdown"
+            );
+        } else {
+            // Linux SIGKILL / Windows TerminateProcess. This is NOT fsync,
+            // durable ACK or a guarantee partial Bao survived power-loss.
+            child.0.kill().expect("terminate real active worker");
+            assert!(
+                !await_exit(&mut child.0).success(),
+                "killed worker must not report a clean shutdown"
+            );
+        }
+        let captured = reader.join().expect("read terminated child output");
+        assert!(captured.contains(READY_MARKER));
+        if clean {
+            assert!(captured.contains(CLEAN_MARKER), "{captured}");
+        } else {
+            assert!(
+                !captured.contains(CLEAN_MARKER),
+                "killed process may not publish a clean-close marker"
+            );
+        }
+        // The whole OS process (and all its Tokio actor threads) is gone.
+        // Obtain the *next* independent lease before inspecting any bytes.
+        let owner =
+            StoreLease::acquire(&root).expect("post-join OS custody must be reacquirable");
+        let payload = make_data();
+        let (identity, _) = prepare(&payload);
+        assert!(
+            read_candidates(
+                &owner,
+                identity.manifest.id.0,
+                identity.manifest.size,
+                IROH_PREORDER_16K,
+            )
+            .unwrap()
+            .is_empty(),
+            "neither clean nor crash worker may publish candidate checkpoints"
+        );
+        if clean {
+            let verified = audit_clean_closed_fixture(&root, identity, range())
+                .expect("independent clean-reopen Bao authentication");
+            assert_eq!(verified, payload[START as usize..END as usize]);
+        } else {
+            // No skip is authorized after crash. Physical Bao may or may not
+            // authenticate; only a separate audit can later distinguish it.
+            let _ = audit_clean_closed_fixture(&root, identity, range());
+        }
+        drop(owner);
+        drop(child); // already joined; guard must not act on exited worker
+        fs::remove_dir_all(&root).expect("delete only disposable CI directory");
+        println!(
+            "STY_G2_05H3A child_process=true mode={} join_confirmed=true \
+             reacquire_after_exit=true checkpoint_published=false \
+             clean_bao_verified={} kill_is_not_durable_ack=true file_gate=false",
+            if clean { "clean" } else { "kill" },
+            clean
+        );
+    }
+}
