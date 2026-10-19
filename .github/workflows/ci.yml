@@ -18,18 +18,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      # Check compilation before formatting so rustfmt does not hide errors.
-      - run: cargo test --all-targets --all-features
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo fmt --all -- --check
+      - name: Verify committed Cargo.lock
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      - name: Test base contracts without Bao
+        run: cargo test --locked --all-targets --no-default-features
+      - name: Test Bao proof adapter
+        run: cargo test --locked --all-targets --all-features
+      - name: Clippy all features
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
         if: always()
-      # Temporary read-only provenance output. Cargo.lock contains public package
-      # versions and checksums, not credentials. Remove after committing the lock.
-      - name: Print resolved Cargo.lock for dependency audit
-        if: always()
-        shell: bash
-        run: |
-          echo STAYA_LOCKFILE_BEGIN
-          if test -f Cargo.lock; then cat Cargo.lock; else echo LOCKFILE_MISSING; fi
-          echo STAYA_LOCKFILE_END
-
