@@ -42,3 +42,11 @@ Pin exact upstream commit SHAs and Cargo.lock before adding production
 adapters. Do not silently switch `iroh-blobs` v0.103.1 to fork `main`.
 Development plan: [STY-MASTER-PLAN-02](https://app.notion.com/p/3fe32a84beec81e5acf7c081fe5e0bfd);
 [canonical feature catalogue](https://app.notion.com/p/3fe32a84beec81498edde0237851cf5d).
+
+## STY-G1b: planned resume ranges (Draft)
+
+The [missing-range planner](src/planner.rs) lazily schedules missing byte intervals under an absolute 1 MiB per-request bound. A private-rooted VerifiedCheckpoint rejects ranges from a different immutable Manifest (root and length). Only an empty checkpoint can be created by external callers; a future Bao adapter must authenticate proof before recording any nonempty verified interval.
+
+Nine unit tests cover gaps, duplicates/adjacency, wrong root/size, boundaries, oversized budgets and integer extremes. [ADR-0002](docs/ADR-0002-sty-g1b-range-planner.md) defines the security assumptions.
+
+**Not yet implemented:** actual Bao range verification, Roha connectivity, durable checkpoint persistence, resumed transfer across process restarts or Akula File Gate integration. The synthetic trusted ranges used in unit tests are not evidence of cryptographic verification. No CI pass is assumed until the exact-head run completes.

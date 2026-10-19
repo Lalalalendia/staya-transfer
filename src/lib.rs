@@ -9,6 +9,8 @@ use std::ops::Range;
 
 pub mod lab;
 
+pub mod planner;
+
 /// A BLAKE3 content root, distinct from peer and Akula revision identities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ContentId(pub [u8; 32]);
