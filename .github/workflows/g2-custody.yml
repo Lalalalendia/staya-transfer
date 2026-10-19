@@ -3,6 +3,9 @@ on:
   pull_request:
     paths:
       - 'custody/**'
+      - 'interop/fsstore_partial_adapter.rs'
+      - 'interop/fsstore_partial_gate.rs'
+      - 'interop/fsstore_shutdown_supervisor.rs'
       - '.github/workflows/g2-custody.yml'
   push:
     branches: [main]
