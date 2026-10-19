@@ -1,9 +1,16 @@
 name: Rust contracts
 on:
+  # Feature pushes are covered by the PR event, avoiding duplicate runs.
   push:
+    branches: [main]
   pull_request:
 permissions:
   contents: read
+# Only the newest commit on a PR needs a runner. Branch-independent gates
+# remain separately verifiable; main pushes have their own group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
