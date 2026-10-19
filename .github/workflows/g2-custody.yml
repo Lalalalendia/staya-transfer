@@ -34,6 +34,12 @@ jobs:
         run: cargo fmt --manifest-path custody/Cargo.toml --all -- --check
       - name: OS-process ownership, hardlink and kill regression tests
         run: cargo test --manifest-path custody/Cargo.toml --locked --all-targets -- --nocapture
+      # Evidence-only A/B: unlike the ordinary test, this path explicitly
+      # issues LOCK_UN. Runs untraced even when the original Drop test fails.
+      # Do not interpret this experiment as production custody acceptance.
+      - name: Experiment explicit unlock after quiescent owner
+        if: always() && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        run: cargo test --manifest-path custody/Cargo.toml --locked --test process explicit_unlock_reacquire_128_with_competing_process -- --exact --nocapture
       # Temporary PR-only forensic step; REMOVE before accepting G2-05d.
       - name: Diagnose Linux flock syscall history after an ownership failure
         if: failure() && runner.os == 'Linux' && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
