@@ -251,6 +251,76 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_bao_range_enters_bounded_checkpoint() {
+        use crate::planner::MissingRanges;
+
+        let data = sample_data();
+        let (request, encoded) = fixture(&data, 5000..14000);
+        let verified = verify_bao_range(&request, &encoded).unwrap();
+        let mut checkpoint = crate::planner::VerifiedCheckpoint::empty(request.manifest);
+        assert_eq!(checkpoint.staged_ranges().count(), 0);
+        checkpoint.record_bao(verified).unwrap();
+
+        let recorded = checkpoint.staged_ranges().next().unwrap();
+        assert_eq!(recorded.bytes(), &data[5000..14000]);
+        assert_eq!(checkpoint.verified_ranges(), &[5000..14000]);
+
+        let plan = MissingRanges::from_checkpoint(
+            request.manifest,
+            &checkpoint,
+            crate::TransferBudget {
+                max_inflight_bytes: 9000,
+                max_sources: 1,
+                max_retries: 0,
+            },
+        )
+        .unwrap();
+
+        let ranges = plan.map(|r| (r.start(), r.end())).collect::<Vec<_>>();
+        assert_eq!(ranges[0], (0, 5000));
+        assert_eq!(ranges[1], (14000, 23000));
+        assert!(ranges.iter().all(|(s, e)| *e <= 5000 || *s >= 14000));
+    }
+
+    #[test]
+    fn checkpoint_rejects_cryptographically_verified_other_root() {
+        let data = sample_data();
+        let (req, encoded) = fixture(&data, 1500..30000);
+        let verified = verify_bao_range(&req, &encoded).unwrap();
+        let different = Manifest {
+            id: ContentId([97; 32]),
+            size: req.manifest.size,
+        };
+        let mut checkpoint = crate::planner::VerifiedCheckpoint::empty(different);
+        assert!(matches!(
+            checkpoint.record_bao(verified),
+            Err(TransferError::InvalidRange)
+        ));
+        assert!(checkpoint.verified_ranges().is_empty());
+    }
+
+    #[test]
+    fn checkpoint_memory_limit_rejects_repeated_proofs_without_promotion() {
+        const MIB: usize = 1024 * 1024;
+        let data = vec![3u8; MIB + 64];
+        let (req, encoded) = fixture(&data, 0..MIB as u64);
+        let mut checkpoint = crate::planner::VerifiedCheckpoint::empty(req.manifest);
+
+        for _ in 0..8 {
+            let proof = verify_bao_range(&req, &encoded).unwrap();
+            checkpoint.record_bao(proof).unwrap();
+        }
+        assert_eq!(checkpoint.staged_ranges().count(), 8);
+        let ninth = verify_bao_range(&req, &encoded).unwrap();
+        assert!(matches!(
+            checkpoint.record_bao(ninth),
+            Err(TransferError::InvalidBudget)
+        ));
+        assert_eq!(checkpoint.staged_ranges().count(), 8);
+        assert_eq!(checkpoint.verified_ranges(), &[0..MIB as u64]);
+    }
+
+    #[test]
     fn huge_range_is_refused_even_before_parse() {
         let manifest = Manifest {
             id: ContentId([0; 32]),
