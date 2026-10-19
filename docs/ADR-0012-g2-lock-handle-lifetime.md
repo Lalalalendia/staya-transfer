@@ -24,3 +24,13 @@ Reference: https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock
 - If old `WouldBlock` recurs after this patch, diagnose physical inode identity, descriptors and process ownership rather than silently retrying `StoreLease::acquire`. This patch makes resource lifetime smaller and checkable, but we must not declare a confirmed root cause without repeatable evidence.
 - POSIX `flock` and Windows `LockFileEx` are cooperative; hostile writes or concurrent pathname replacement remain possible. Linux fork-inherited lock descriptors, Windows ReFS identity false-positives, and Windows directory durability remain outside scope.
 - All G2-05 post-SIGKILL physical Bao guarantees remain governed by separate G2-05a. This PR cannot mint verified ranges, publication rights or Akula File Gate authority.
+
+## Parallel-suite falsification and deterministic inheritance probe (20 October 2026)
+
+At exact-head GitHub Actions #39316625306, Linux ran eight serial full integration-test suites with **0 failures**, versus eight parallel full suites with **7 failures**; isolated untraced Drop-only stress had **0/16 failures**. Windows passed. Linux failure is `File::try_lock: WouldBlock` on a freshly reopened lockfile, and an inspection **after** failure found no matching fd or /proc/locks entry. Thus the strongest observation is a parallel test/process timing dependency, not an established kernel bug.
+
+Hypothesis: a concurrently spawned child briefly inherits a `flock`-carrying open file *description* before `exec` closes its inherited descriptor. When the original owner closes during that window, the kernel lock may outlive it. This is not yet a verified explanation for the CI failure.
+
+The Linux-only `inherited_lock_description_survives_parent_close_until_child_exit` regression deliberately passes a duplicate of a locked file description as child stdin, waits for the child to confirm startup, closes the parent's original FD, verifies a separate process gets BUSY, kills/reaps child, then verifies ACQUIRED. It tests Linux descriptor-lifetime semantics **without** depending on the spontaneous scheduling race. The mandatory original parallel stress remains unchanged. Neither test warrants explicit `unlock()` in `Drop` or production deployment.
+
+Before any root-cause claim: inspect exact-head CI, then distinguish the artificial inherited-FD proof from the real non-inheriting subprocess path. Consider whether Rust stdlib's spawn closes descriptors at exec and whether lock lifetime could be extended only in a pre-exec interval. Preserve normal fail-closed behavior and isolate production ownership from test-only mitigations.
