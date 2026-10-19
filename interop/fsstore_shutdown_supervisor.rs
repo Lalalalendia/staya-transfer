@@ -20,6 +20,35 @@ use staya_custody_lab::{
 use staya_transfer::{ByteRange, recovery::StoreIdentity};
 use std::{path::Path, sync::atomic::AtomicBool};
 
+/// FsStore::load starts its own actor initialization on a spawned Tokio
+/// runtime *before* the load future resolves. Cancelling that await can detach
+/// the actor initialization while an ordinary local StoreLease would Drop and
+/// unlock too early. Hold OS custody through that entire await.
+struct OpeningFsStore {
+    owner: Option<StoreLease>,
+}
+
+impl Drop for OpeningFsStore {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.take() {
+            // Error/cancellation during upstream actor start: there is no
+            // reliable actor handle available to await or abort. Fail closed
+            // rather than admitting another writer during detached init.
+            // LAB ONLY: the process must exit to reclaim this lease.
+            eprintln!("STY_G2_05H2_ABANDONED_OPEN custody_retained_until_exit=true");
+            std::mem::forget(owner);
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn simulate_cancelled_open_for_test(root: &Path) -> Result<(), String> {
+    let owner = StoreLease::acquire(root).map_err(|e| format!("test opening lease: {e}"))?;
+    let opening = OpeningFsStore { owner: Some(owner) };
+    drop(opening);
+    Ok(())
+}
+
 /// Only this wrapper receives the owned FsStore instance and OS custody.
 /// Neither the actor nor the exclusive lock is exposed to an import caller.
 pub struct ActiveFsStore {
@@ -69,9 +98,16 @@ impl ActiveFsStore {
             .map_err(|e| format!("create bounded admission ledger: {e}"))?;
         // The owner is kept alive while the actor loads and for its entire
         // lifetime. If load fails, no actor has been returned to the caller.
-        let actor = FsStore::load(owner.canonical_root())
-            .await
-            .map_err(|e| format!("load real pinned FsStore: {e}"))?;
+        // If this future is cancelled during the upstream spawn/await,
+        // OpeningFsStore::drop MUST retain custody until process exit.
+        // ActiveFsStore::drop alone cannot protect a not-yet-built object.
+        let mut opening = OpeningFsStore { owner: Some(owner) };
+        let actor = FsStore::load(
+            opening.owner.as_ref().expect("opening custody invariant").canonical_root(),
+        )
+        .await
+        .map_err(|e| format!("load real pinned FsStore: {e}"))?;
+        let owner = opening.owner.take().expect("opening custody invariant");
         Ok(Self {
             owner: Some(owner),
             actor: Some(actor),
