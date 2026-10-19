@@ -1,4 +1,4 @@
-# ADR-0012 — STY-G2-05c: ownership identity descriptor lifetime and reacquisition
+# ADR-0012 — STY-G2-05d: ownership identity descriptor lifetime and reacquisition
 
 Parent: [STY-G2 issue #7](https://github.com/Lalalalendia/staya-transfer/issues/7) and [STY-MASTER-PLAN-02](https://app.notion.com/p/3fe32a84beec81e5acf7c081fe5e0bfd). The scope is **one existing cooperative OS lock**, not implementing new locks, FsStore data recovery, or Akula sync.
 
