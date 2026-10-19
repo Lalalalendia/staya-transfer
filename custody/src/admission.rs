@@ -151,7 +151,6 @@ impl Admission {
     }
 }
 
-
 /// A process-local, thread-safe logical capacity ledger. Not shared between
 /// independent processes, and not a hard limit on FsStore's physical disk use.
 /// The cooperative StoreLease must still be held by the caller.
@@ -219,7 +218,6 @@ impl Drop for InflightPermit {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,7 +240,11 @@ mod tests {
 
         let separate = shared.clone();
         std::thread::spawn(move || {
-            assert!(separate.reserve(Reservation::new(1, 1, 1).unwrap()).is_err());
+            assert!(
+                separate
+                    .reserve(Reservation::new(1, 1, 1).unwrap())
+                    .is_err()
+            );
         })
         .join()
         .unwrap();
@@ -263,7 +265,9 @@ mod tests {
         assert!(shared.reserve(huge).is_err());
         assert_eq!(shared.usage().unwrap(), (0, 0, 0));
         {
-            let _permit = shared.reserve(Reservation::new(1, 256, 2).unwrap()).unwrap();
+            let _permit = shared
+                .reserve(Reservation::new(1, 256, 2).unwrap())
+                .unwrap();
             assert_eq!(shared.usage().unwrap(), (1, 256, 2));
         }
         assert_eq!(shared.usage().unwrap(), (0, 0, 0));
