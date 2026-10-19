@@ -17,6 +17,6 @@ bao = ["dep:bao-tree"]
 [dependencies]
 # The standalone STY-G1 mock verifies complete objects, not Bao ranges.
 blake3 = "=1.8.5"
-# Exactly the Bao proof protocol version used by iroh-blobs 0.103.1.
+# Matches bao-tree 0.16.1 in Lalalalendia/iroh-blobs Cargo.lock at a8f5b65d.
 # Feature-gated to keep the base contracts independent of network libraries.
-bao-tree = { version = "=0.16.0", default-features = false, optional = true }
+bao-tree = { version = "=0.16.1", default-features = false, optional = true }
