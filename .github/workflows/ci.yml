@@ -23,3 +23,13 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo fmt --all -- --check
         if: always()
+      # Temporary read-only provenance output. Cargo.lock contains public package
+      # versions and checksums, not credentials. Remove after committing the lock.
+      - name: Print resolved Cargo.lock for dependency audit
+        if: always()
+        shell: bash
+        run: |
+          echo STAYA_LOCKFILE_BEGIN
+          if test -f Cargo.lock; then cat Cargo.lock; else echo LOCKFILE_MISSING; fi
+          echo STAYA_LOCKFILE_END
+
