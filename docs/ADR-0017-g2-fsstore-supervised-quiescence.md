@@ -47,3 +47,11 @@ Second process may independently attempt OS ownership + Bao revalidation
 This is NOT `G2-05h` completion, a full child-writer join, proof that `FsStore::shutdown` covers power-loss, a verified post-SIGKILL range skip, physical disk quota, enforced all-path adversarial ownership, or any Akula File Gate permission. The intentional lock leak on abandoned actors is operationally unacceptable in a production daemon.
 
 The next separate step must register/join all authorized child writers (and own explicit cancellation/abort semantics), then replace the laboratory leak-on-abandon safety measure with bounded supervised shutdown. Only after that may clean explicit OS unlock be considered. Keep G2-06/G3 blocked.
+
+## Safety review: opening future cancellation (20 October 2026)
+
+The pinned `iroh-blobs` `FsStore::load_with_opts` invokes `handle.spawn(Actor::new(...))` and awaits that initialization before returning an `FsStore`. Dropping the outer future during that await can detach the spawned actor initialization before our own `ActiveFsStore` is built. A plain local `StoreLease` would then be dropped too early, enabling a competing owner while upstream initialization might still write to the same directory.
+
+This lab therefore also holds custody through `OpeningFsStore`. After the OS lease and admission ledger are established, the opening guard owns the lease **across** `FsStore::load().await`. Its cancellation/error Drop intentionally retains the lease until OS process exit; only successful upstream load transfers custody into `ActiveFsStore`. Early validation/admission errors **before** the upstream await do not enter this guard. The existing independent-process abandoned-actor gate now additionally simulates an opening-guard cancellation and verifies BUSY before process exit and successful reacquire afterward.
+
+**Important:** that deterministic simulation exercises guard lifetime, not an actual cancellation at a paused `Actor::new` instruction. Upstream initialization cancellation with injected scheduling and a bounded production abort/join remains an explicit G2-05h3 requirement. Intentional handle leaks during cancelled/failed opening or actor shutdown remain unacceptable in a long-lived production process. This PR still does **not** prove child-writer quiescence, unlock safety under fork inheritance, or a durable resume/skip.
