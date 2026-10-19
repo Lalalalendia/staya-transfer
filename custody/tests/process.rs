@@ -298,6 +298,52 @@ fn explicit_unlock_reacquire_128_with_competing_process() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Reproduces the Linux kernel's open-file-description inheritance rule
+/// deterministically, without relying on a flaky fork/exec scheduling window.
+/// This is a syscall-semantics probe, not proof that the production lock raced.
+#[cfg(target_os = "linux")]
+#[test]
+fn inherited_lock_description_survives_parent_close_until_child_exit() {
+    use std::fs::OpenOptions;
+    let root = private_root("inherited-flock");
+    let lock_path = root.join(".staya-writer.lock");
+    let owner = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .expect("fresh lock inode");
+    owner.try_lock().expect("exclusive parent owner");
+
+    // Pass an actual duplicate of the LOCKED open file description to a
+    // child via stdin. This intentionally bypasses close-on-exec.
+    let child_stdin = owner.try_clone().expect("duplicate owner fd");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_staya-custody-worker"))
+        .arg("hold-inherited-fd")
+        .arg(&root)
+        .stdin(Stdio::from(child_stdin))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn inherited descriptor holder");
+
+    let mut ready = String::new();
+    BufReader::new(child.stdout.take().expect("child stdout"))
+        .read_line(&mut ready)
+        .expect("child ready marker");
+    assert_eq!(ready.trim(), "INHERITED_FD_READY");
+    drop(owner);
+
+    // Parent file is closed, but the child still holds that very same
+    // description. An unrelated opener must fail closed.
+    assert_eq!(stdout_text(&worker("probe", &root)), "BUSY");
+    child.kill().expect("kill inherited descriptor holder");
+    child.wait().expect("reap holder");
+    assert_eq!(stdout_text(&worker("probe", &root)), "ACQUIRED");
+    println!("STY_G2_05D_INHERITED_FD parent_closed_child_alive=BUSY child_exited=ACQUIRED");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn symbolic_link_alias_is_denied() {
