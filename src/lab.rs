@@ -190,7 +190,10 @@ mod tests {
             }
             let start = request.range.start() as usize;
             let end = request.range.end() as usize;
-            let bytes = self.data.get(start..end).ok_or(TransferError::CorruptData)?;
+            let bytes = self
+                .data
+                .get(start..end)
+                .ok_or(TransferError::CorruptData)?;
             if bytes.len() != output.len() {
                 return Err(TransferError::CorruptData);
             }
