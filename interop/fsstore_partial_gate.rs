@@ -6,6 +6,10 @@
 #[path = "fsstore_partial_adapter.rs"]
 mod partial_adapter;
 
+#[path = "fsstore_shutdown_supervisor.rs"]
+mod shutdown_supervisor;
+
+use shutdown_supervisor::ActiveFsStore;
 use bao_tree::{
     BlockSize, ByteRanges,
     io::{outboard::PreOrderMemOutboard, round_up_to_chunks, sync::encode_ranges_validated},
@@ -16,7 +20,7 @@ use partial_adapter::{
 };
 use staya_custody_lab::{
     StoreLease,
-    admission::{Limits, SharedAdmission},
+    admission::{Limits, Reservation, SharedAdmission},
     checkpoint::{CheckpointClaim, IROH_PREORDER_16K, read_candidates},
     partial_barrier::publish_after_quiescent_audit,
 };
@@ -395,4 +399,120 @@ async fn real_fsstore_admission_rejects_before_write_and_releases_after_stage() 
     })
     .await
     .expect("bounded G2-05f real FsStore fixture");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_fsstore_supervised_quiescence_blocks_early_handoff_and_reaudits_bao() {
+    tokio::time::timeout(TIMEOUT, async {
+        let root = std::env::temp_dir().join(format!(
+            "staya-g2-05h2-{}-{}",
+            std::process::id(),
+            std::env::var("STY_INTEROP_VARIANT").unwrap_or_else(|_| "ci".to_owned()),
+        ));
+        assert!(!root.exists(), "no existing user store may be reused");
+        fs::create_dir(&root).expect("new private test root");
+        let payload = make_data();
+        let (expected, wire) = prepare(&payload);
+        let reserved_bytes = range()
+            .len()
+            .checked_add(u64::try_from(wire.len()).unwrap())
+            .unwrap();
+        let active = ActiveFsStore::open(
+            &root,
+            Limits {
+                max_partial_objects: 1,
+                max_reserved_bytes: reserved_bytes,
+                max_open_handles: 4,
+                max_retries_per_object: 2,
+            },
+        )
+        .await
+        .expect("real actor must start under its OS owner");
+
+        let cancelled = AtomicBool::new(false);
+        let (_accepted, held_permit) = active
+            .stage(expected, range(), &wire, &cancelled)
+            .await
+            .expect("real Bao import accepted under a live permit");
+        let closing = active
+            .begin_closing()
+            .unwrap_or_else(|(_, e)| panic!("cannot begin real actor closure: {e}"));
+        assert!(
+            closing
+                .admissions()
+                .reserve(Reservation::new(1, 1, 1).unwrap())
+                .is_err(),
+            "no permits from late clones after Closing begins"
+        );
+
+        // Actor shutdown is denied, and the original OS lease remains
+        // owned, while one real imported range still has an active permit.
+        let closing = match closing.finish().await {
+            Ok(_) => panic!("a live permit may not become quiescent"),
+            Err((closing, error)) => {
+                assert!(error.contains("permits have not drained"), "{error}");
+                closing
+            }
+        };
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock
+            ),
+            "failed quiescence may not permit a second cooperative OS writer"
+        );
+
+        drop(held_permit);
+        assert!(closing.admissions().admissions_drained().unwrap());
+        // Only the *actual* pinned FsStore actor's successful shutdown can
+        // construct the private quiescence witness. No caller can mint it.
+        let quiescent = match closing.finish().await {
+            Ok(result) => result,
+            Err((_, err)) => panic!("real FsStore actor shutdown failed: {err}"),
+        };
+        assert!(quiescent.admissions_drained().unwrap());
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock
+            ),
+            "quiescent witness must still hold OS custody for Bao audit"
+        );
+        let physical = audit_clean_closed_fixture(&root, expected, range())
+            .expect("independently authenticate the physical sparse Bao range");
+        assert_eq!(physical, payload[START as usize..END as usize]);
+        assert!(
+            read_candidates(
+                quiescent.owner(),
+                expected.manifest.id.0,
+                expected.manifest.size,
+                IROH_PREORDER_16K,
+            )
+            .unwrap()
+            .is_empty(),
+            "successfully closing an actor must not publish a checkpoint"
+        );
+        quiescent.finish_clean(); // drops the lock; NEVER calls explicit LOCK_UN.
+
+        let second = StoreLease::acquire(&root)
+            .expect("another cooperative writer can acquire after clean closure");
+        let reopened = FsStore::load(&root)
+            .await
+            .expect("real actor reopens while the second owner is held");
+        let authenticated = audit_clean_closed_fixture(&root, expected, range())
+            .expect("reopened owner independently rechecks the same bytes");
+        assert_eq!(authenticated, payload[START as usize..END as usize]);
+        reopened
+            .shutdown()
+            .await
+            .expect("second actor must shut down cleanly");
+        drop(reopened);
+        drop(second);
+        fs::remove_dir_all(&root).expect("remove only disposable test root");
+        println!(
+            "STY_G2_05H2 real_fsstore=true owner_held_during_drain=true close_denied_with_permit=true actor_shutdown_confirmed=true quiescent_witness_private=true physical_bao_reverified=true checkpoint_minted=false explicit_lock_un=false child_writer_join_proven=false file_gate=false"
+        );
+    })
+    .await
+    .expect("bounded real FsStore actor shutdown fixture");
 }
