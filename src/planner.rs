@@ -13,6 +13,33 @@ use std::ops::Range;
 /// Hard upper bound for an individual planned read.
 pub const MAX_PLANNED_RANGE_BYTES: u64 = 1024 * 1024;
 
+/// A checkpoint tied to one exact object identity.
+/// External callers can only create an EMPTY checkpoint: verified ranges will
+/// be inserted later by a crate-controlled cryptographic backend after proof
+/// verification. In particular, peer-reported byte intervals are not trusted.
+#[derive(Debug)]
+pub struct VerifiedCheckpoint {
+    manifest: Manifest,
+    verified: VerifiedRanges,
+}
+
+impl VerifiedCheckpoint {
+    pub fn empty(manifest: Manifest) -> Self {
+        Self {
+            manifest,
+            verified: VerifiedRanges::default(),
+        }
+    }
+
+    pub fn manifest(&self) -> Manifest {
+        self.manifest
+    }
+
+    pub fn verified_ranges(&self) -> &[Range<u64>] {
+        self.verified.ranges()
+    }
+}
+
 /// Lazily produces missing intervals without proportional memory allocation.
 #[derive(Debug)]
 pub struct MissingRanges<'a> {
@@ -24,13 +51,18 @@ pub struct MissingRanges<'a> {
 }
 
 impl<'a> MissingRanges<'a> {
-    /// Precondition: ranges have been verified against the given manifest
-    /// by a trusted Bao/BLAKE3 backend, not merely declared by a remote peer.
-    pub fn from_trusted_ranges(
+    /// This validates the object's identity and interval geometry; it does
+    /// not invent cryptographic proof. The checkpoint is never constructed
+    /// from a peer-supplied list of allegedly verified ranges.
+    pub fn from_checkpoint(
         manifest: Manifest,
-        ranges: &'a VerifiedRanges,
+        checkpoint: &'a VerifiedCheckpoint,
         budget: TransferBudget,
     ) -> Result<Self, TransferError> {
+        if checkpoint.manifest != manifest {
+            return Err(TransferError::InvalidRange);
+        }
+        let ranges = &checkpoint.verified;
         budget.validate()?;
         if budget.max_inflight_bytes > MAX_PLANNED_RANGE_BYTES {
             return Err(TransferError::InvalidBudget);
@@ -125,15 +157,15 @@ mod tests {
 
     #[test]
     fn empty_manifest_has_no_work() {
-        let already = VerifiedRanges::default();
-        let plan = MissingRanges::from_trusted_ranges(manifest(0), &already, budget(4)).unwrap();
+        let already = VerifiedCheckpoint::empty(manifest(0));
+        let plan = MissingRanges::from_checkpoint(manifest(0), &already, budget(4)).unwrap();
         assert_eq!(plan.count(), 0);
     }
 
     #[test]
     fn splits_unverified_object_into_bounded_requests() {
-        let already = VerifiedRanges::default();
-        let plan = MissingRanges::from_trusted_ranges(manifest(10), &already, budget(3)).unwrap();
+        let already = VerifiedCheckpoint::empty(manifest(10));
+        let plan = MissingRanges::from_checkpoint(manifest(10), &already, budget(3)).unwrap();
         assert_eq!(
             plan.map(pair).collect::<Vec<_>>(),
             [(0, 3), (3, 6), (6, 9), (9, 10)]
@@ -142,11 +174,11 @@ mod tests {
 
     #[test]
     fn skips_verified_spans_and_covers_each_missing_byte() {
-        let mut already = VerifiedRanges::default();
-        already.add_verified(ByteRange::new(8, 12, 22).unwrap());
-        already.add_verified(ByteRange::new(0, 4, 22).unwrap());
-        already.add_verified(ByteRange::new(17, 22, 22).unwrap());
-        let plan = MissingRanges::from_trusted_ranges(manifest(22), &already, budget(3)).unwrap();
+        let mut already = VerifiedCheckpoint::empty(manifest(22));
+        already.verified.add_verified(ByteRange::new(8, 12, 22).unwrap());
+        already.verified.add_verified(ByteRange::new(0, 4, 22).unwrap());
+        already.verified.add_verified(ByteRange::new(17, 22, 22).unwrap());
+        let plan = MissingRanges::from_checkpoint(manifest(22), &already, budget(3)).unwrap();
         assert_eq!(
             plan.map(pair).collect::<Vec<_>>(),
             [(4, 7), (7, 8), (12, 15), (15, 17)]
@@ -155,31 +187,31 @@ mod tests {
 
     #[test]
     fn fully_verified_object_needs_no_download() {
-        let mut already = VerifiedRanges::default();
-        already.add_verified(ByteRange::new(0, 5, 5).unwrap());
-        let plan = MissingRanges::from_trusted_ranges(manifest(5), &already, budget(1)).unwrap();
+        let mut already = VerifiedCheckpoint::empty(manifest(5));
+        already.verified.add_verified(ByteRange::new(0, 5, 5).unwrap());
+        let plan = MissingRanges::from_checkpoint(manifest(5), &already, budget(1)).unwrap();
         assert_eq!(plan.count(), 0);
     }
 
     #[test]
     fn rejects_checkpoint_from_different_content_length() {
-        let mut stale = VerifiedRanges::default();
-        stale.add_verified(ByteRange::new(0, 15, 15).unwrap());
+        let mut stale = VerifiedCheckpoint::empty(manifest(15));
+        stale.verified.add_verified(ByteRange::new(0, 15, 15).unwrap());
         assert!(matches!(
-            MissingRanges::from_trusted_ranges(manifest(10), &stale, budget(2)),
+            MissingRanges::from_checkpoint(manifest(10), &stale, budget(2)),
             Err(TransferError::InvalidRange)
         ));
     }
 
     #[test]
     fn rejects_unbounded_or_zero_budget() {
-        let already = VerifiedRanges::default();
+        let already = VerifiedCheckpoint::empty(manifest(10));
         assert!(matches!(
-            MissingRanges::from_trusted_ranges(manifest(10), &already, budget(0)),
+            MissingRanges::from_checkpoint(manifest(10), &already, budget(0)),
             Err(TransferError::InvalidBudget)
         ));
         assert!(matches!(
-            MissingRanges::from_trusted_ranges(
+            MissingRanges::from_checkpoint(
                 manifest(10),
                 &already,
                 budget(MAX_PLANNED_RANGE_BYTES + 1)
@@ -190,9 +222,9 @@ mod tests {
 
     #[test]
     fn near_u64_max_remains_lazy_without_overflow() {
-        let mut already = VerifiedRanges::default();
-        already.add_verified(ByteRange::new(0, u64::MAX - 10, u64::MAX).unwrap());
-        let mut plan = MissingRanges::from_trusted_ranges(
+        let mut already = VerifiedCheckpoint::empty(manifest(u64::MAX));
+        already.verified.add_verified(ByteRange::new(0, u64::MAX - 10, u64::MAX).unwrap());
+        let mut plan = MissingRanges::from_checkpoint(
             manifest(u64::MAX),
             &already,
             budget(1024),
@@ -203,11 +235,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_checkpoint_of_different_identity_even_with_same_size() {
+        let checkpoint = VerifiedCheckpoint::empty(manifest(10));
+        let other = Manifest {
+            id: ContentId([5; 32]),
+            size: 10,
+        };
+        assert!(matches!(
+            MissingRanges::from_checkpoint(other, &checkpoint, budget(2)),
+            Err(TransferError::InvalidRange)
+        ));
+    }
+
+    #[test]
     fn adjacent_verified_spans_are_coalesced() {
-        let mut already = VerifiedRanges::default();
-        already.add_verified(ByteRange::new(5, 8, 10).unwrap());
-        already.add_verified(ByteRange::new(2, 5, 10).unwrap());
-        let plan = MissingRanges::from_trusted_ranges(manifest(10), &already, budget(4)).unwrap();
+        let mut already = VerifiedCheckpoint::empty(manifest(10));
+        already.verified.add_verified(ByteRange::new(5, 8, 10).unwrap());
+        already.verified.add_verified(ByteRange::new(2, 5, 10).unwrap());
+        let plan = MissingRanges::from_checkpoint(manifest(10), &already, budget(4)).unwrap();
         assert_eq!(plan.map(pair).collect::<Vec<_>>(), [(0, 2), (8, 10)]);
     }
 }
