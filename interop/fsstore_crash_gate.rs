@@ -199,6 +199,14 @@ async fn run_and_reopen(mode: &str) {
         !exit.success(),
         "test worker exited gracefully, not by kill"
     );
+    // On Windows Child::kill() invokes TerminateProcess; unlike Linux
+    // SIGKILL, Windows reports a process exit code rather than a Unix signal.
+    // This is crash-process evidence, NOT power-loss persistence evidence.
+    #[cfg(windows)]
+    println!(
+        "STY_G2_05E_WINDOWS_TERMINATE_PROCESS mode={mode} exit_code={:?}",
+        exit.code()
+    );
     drop(child);
 
     let owner = StoreLease::acquire(&root).expect("independent process reclaims OS lock");
@@ -279,6 +287,12 @@ async fn real_fsstore_kill_reopen_candidate_gate() {
         }
         run_and_reopen("uncommitted").await;
         run_and_reopen("checkpointed").await;
+        // Both child-process kill paths must finish before this marker.
+        // Windows must never claim a durably published partial checkpoint.
+        #[cfg(windows)]
+        println!(
+            "STY_G2_05E_WINDOWS_REAL_FSSTORE_KILL=PASS uncommitted=true              checkpoint_attempt_denied=true backend_release_or_fork=true              physical_bao_readback=true trusted_skip=false power_loss_tested=false"
+        );
     })
     .await
     .expect("G2-05a subprocess and reopen must be bounded");
