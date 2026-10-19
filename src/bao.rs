@@ -146,13 +146,12 @@ pub fn verify_bao_range(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bao_tree::io::sync::{encode_ranges_validated, CreateOutboard};
-    use bao_tree::io::outboard::PreOrderOutboard;
+    use bao_tree::io::outboard::PreOrderMemOutboard;
+    use bao_tree::io::sync::encode_ranges_validated;
     use crate::{ContentId, TransferRequest};
 
     fn fixture(data: &[u8], range: std::ops::Range<u64>) -> (TransferRequest, Vec<u8>) {
-        let outboard =
-            PreOrderOutboard::<Vec<u8>>::create(Cursor::new(data), IROH_BLOCK_SIZE).unwrap();
+        let outboard = PreOrderMemOutboard::create(data, IROH_BLOCK_SIZE);
         let manifest = Manifest {
             id: ContentId(*outboard.root.as_bytes()),
             size: data.len() as u64,
