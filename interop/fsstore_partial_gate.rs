@@ -354,8 +354,24 @@ async fn real_fsstore_admission_rejects_before_write_and_releases_after_stage() 
             "second pending import must be refused while permit is alive"
         );
         assert_eq!(budget.usage().unwrap(), (1, required, 4));
+        budget.stop_admissions().expect("one-way closing barrier");
+        assert!(
+            !budget.admissions_drained().unwrap(),
+            "closing may not forget the active import permit"
+        );
         drop(permit);
+        assert!(budget.admissions_drained().unwrap());
         assert_eq!(budget.usage().unwrap(), (0, 0, 0));
+        assert!(
+            stage_with_inflight_budget(
+                &owner, &budget, &store, identity, range(), &wire, &cancelled,
+            )
+            .await
+            .is_err(),
+            "a drained but closing ledger must not admit another real FsStore import"
+        );
+        // Admission drained != actor stopped: only the actual shutdown below
+        // can establish the separate clean FsStore quiescence prerequisite.
         store.shutdown().await.expect("clean shutdown is NOT SIGKILL");
         drop(store);
 
@@ -374,7 +390,7 @@ async fn real_fsstore_admission_rejects_before_write_and_releases_after_stage() 
         drop(owner);
         fs::remove_dir_all(root).expect("remove only test directory");
         println!(
-            "STY_G2_05F real_fsstore=true admission_before_write=true cancel_preimport=true bounded_bao_proof=true concurrent_limit=true physical_audit=true durable_ack=false actual_disk_quota=false file_gate=false"
+            "STY_G2_05F real_fsstore=true admission_before_write=true cancel_preimport=true bounded_bao_proof=true concurrent_limit=true physical_audit=true durable_ack=false actual_disk_quota=false file_gate=false closing_gate=true permit_drained=true actor_shutdown_separate=true"
         );
     })
     .await
