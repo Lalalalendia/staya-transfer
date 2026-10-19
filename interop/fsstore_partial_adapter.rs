@@ -92,7 +92,10 @@ pub async fn stage_verified_fixture(
 // This shared test adapter is also compiled by fsstore_crash_gate, which
 // deliberately does not exercise G2-05f admission. The function is used by
 // fsstore_partial_gate on both pinned dependency variants.
-#[allow(dead_code, reason = "used by the partial-import test, not by the crash test")]
+#[allow(
+    dead_code,
+    reason = "used by the partial-import test, not by the crash test"
+)]
 pub async fn stage_with_inflight_budget(
     owner: &StoreLease,
     ledger: &SharedAdmission,
