@@ -302,7 +302,6 @@ async fn direct_quic_get_bao_peer_policy_reconnect() {
     }).await.expect("bounded STY-G1e QUIC interop timeout");
 }
 
-
 #[path = "fsstore_partial_adapter.rs"]
 mod partial_adapter;
 
