@@ -12,13 +12,18 @@ use bao_tree::{
 };
 use iroh_blobs::{Hash, api::blobs::BlobStatus, store::fs::FsStore};
 use partial_adapter::{audit_clean_closed_fixture, stage_verified_fixture};
+use staya_custody_lab::{
+    StoreLease,
+    checkpoint::{CheckpointClaim, IROH_PREORDER_16K, read_candidates},
+    partial_barrier::publish_after_quiescent_audit,
+};
 use staya_transfer::{
     ByteRange, ContentId, Manifest,
     recovery::{BaoStorageProfile, StoreIdentity},
 };
 use std::{
     fs,
-    io::{Seek, SeekFrom, Write},
+    io::{self, Seek, SeekFrom, Write},
     time::Duration,
 };
 
@@ -68,6 +73,8 @@ async fn pinned_partial_import_clean_reopen_with_physical_bao_audit() {
         ));
         assert!(!root.exists(), "do not reuse an existing directory");
         fs::create_dir(&root).expect("new private fixture");
+        // Acquire OS writer custody BEFORE loading the pinned FsStore actor.
+        let ownership = StoreLease::acquire(&root).expect("private store owner");
         let payload = make_data();
         let (identity, wire) = prepare(&payload);
         let hash = Hash::from_bytes(identity.manifest.id.0);
@@ -136,6 +143,56 @@ async fn pinned_partial_import_clean_reopen_with_physical_bao_audit() {
             .expect("post-shutdown physically stored Bao must match root");
         assert_eq!(physical, payload[START as usize..END as usize]);
 
+        // Real FsStore + independent physical Bao audit + four backing file
+        // sync barriers under a single cooperative owner. A checkpoint is
+        // still only a candidate, never a durable/APPLIED byte-range receipt.
+        let journal_claim = CheckpointClaim {
+            sequence: 1,
+            content_root: identity.manifest.id.0,
+            object_len: identity.manifest.size,
+            bao_profile: IROH_PREORDER_16K,
+            start: START,
+            end: END,
+        };
+        assert!(
+            publish_after_quiescent_audit(&ownership, journal_claim, |_| {
+                Err(io::Error::other("mandatory negative audit denied"))
+            })
+            .is_err()
+        );
+        assert!(
+            read_candidates(
+                &ownership,
+                identity.manifest.id.0,
+                identity.manifest.size,
+                IROH_PREORDER_16K
+            )
+            .unwrap()
+            .is_empty()
+        );
+        publish_after_quiescent_audit(&ownership, journal_claim, |_| {
+            let actual = audit_clean_closed_fixture(&root, identity, range())
+                .map_err(io::Error::other)?;
+            if actual != payload[START as usize..END as usize] {
+                return Err(io::Error::other("independent Bao physical bytes differ"));
+            }
+            Ok(())
+        })
+        .expect("quiescent FsStore physical Bao plus directory barrier");
+        assert_eq!(
+            read_candidates(
+                &ownership,
+                identity.manifest.id.0,
+                identity.manifest.size,
+                IROH_PREORDER_16K
+            )
+            .unwrap(),
+            vec![journal_claim]
+        );
+        println!(
+            "STY_G2_04B real_fsstore=true backing_sync=true independent_bao_audit=true checkpoint_claim=true durable_after_sigkill=false file_gate=false"
+        );
+
         let reopened = FsStore::load(&root).await.expect("reopen separate store instance");
         let after = reopened.blobs().observe(hash).await.expect("read reopened bitfield");
         assert!(!after.is_complete(), "still partial after restart");
@@ -160,6 +217,18 @@ async fn pinned_partial_import_clean_reopen_with_physical_bao_audit() {
             audit_clean_closed_fixture(&root, identity, range()).is_err(),
             "modified stored data must not become a trusted range"
         );
+        // Even a valid persisted journal entry MUST NOT let the planner skip
+        // corrupted physical bytes. The claim remains deliberately untrusted.
+        assert_eq!(
+            read_candidates(
+                &ownership,
+                identity.manifest.id.0,
+                identity.manifest.size,
+                IROH_PREORDER_16K
+            )
+            .unwrap(),
+            vec![journal_claim]
+        );
 
         // Restore the fixture and then remove the proof entirely to isolate
         // that second negative case (not merely a stale corrupted data failure).
@@ -176,6 +245,7 @@ async fn pinned_partial_import_clean_reopen_with_physical_bao_audit() {
             "missing Bao outboard cannot mint verified range"
         );
 
+        drop(ownership);
         fs::remove_dir_all(&root).expect("remove private fixture only");
         println!(
             "STY_G2_02 real_fsstore=true partial_bao_import=true clean_reopen=true physical_audit=true tamper_hold=true missing_outboard_hold=true crash_durable=false single_writer=false file_gate=false"

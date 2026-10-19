@@ -3037,6 +3037,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "staya-custody-lab"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "same-file",
+]
+
+[[package]]
 name = "staya-iroh-release-compat"
 version = "0.0.0"
 dependencies = [
@@ -3045,6 +3053,7 @@ dependencies = [
  "iroh",
  "iroh-blobs",
  "postcard",
+ "staya-custody-lab",
  "staya-transfer",
  "tokio",
 ]

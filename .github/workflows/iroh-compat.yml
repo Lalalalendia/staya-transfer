@@ -26,7 +26,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Enforce pinned G1e Cargo.lock (no dependency re-resolution)
+      - name: Enforce pinned release/fork Cargo.lock
         run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1 > /dev/null
       - name: Real FsStore to Staya Bao verification
         env:

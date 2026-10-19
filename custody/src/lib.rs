@@ -8,6 +8,8 @@
 
 pub mod checkpoint;
 
+pub mod partial_barrier;
+
 use same_file::Handle;
 use std::{
     fs::{self, File, Metadata, OpenOptions},
