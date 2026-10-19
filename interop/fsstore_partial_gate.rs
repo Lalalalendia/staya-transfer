@@ -120,6 +120,13 @@ async fn pinned_partial_import_clean_reopen_with_physical_bao_audit() {
         drop(store);
 
         // Independently validate real physical data and real outboard from disk.
+        let data_path = root.join("data").join(format!("{}.data", hash.to_hex()));
+        let proof_path = root.join("data").join(format!("{}.obao4", hash.to_hex()));
+        let data_bytes = fs::metadata(&data_path).map(|x| x.len()).unwrap_or(0);
+        let proof_bytes = fs::metadata(&proof_path).map(|x| x.len()).unwrap_or(0);
+        println!(
+            "STY_G2_02_PHYSICAL_BEFORE_REOPEN data_len={data_bytes} outboard_len={proof_bytes} expected_size={LEN}"
+        );
         let physical = audit_clean_closed_fixture(&root, identity, range())
             .expect("post-shutdown physically stored Bao must match root");
         assert_eq!(physical, payload[START as usize..END as usize]);
