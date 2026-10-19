@@ -40,6 +40,25 @@ jobs:
       - name: Experiment explicit unlock after quiescent owner
         if: always() && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
         run: cargo test --manifest-path custody/Cargo.toml --locked --test process explicit_unlock_reacquire_128_with_competing_process -- --exact --nocapture
+      # Stress both variants in independent test process invocations without
+      # strace. One green run is insufficient given a timing-sensitive failure.
+      - name: Compare 16 independent untraced Drop vs explicit unlock runs
+        if: always() && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        shell: bash
+        run: |
+          drop_failures=0
+          explicit_failures=0
+          for trial in $(seq 1 16); do
+            echo "STY_G2_05D_TRIAL=$trial"
+            if ! cargo test --manifest-path custody/Cargo.toml --locked --test process repeated_drop_and_reacquire_has_no_stale_lock_descriptor -- --exact --quiet; then
+              drop_failures=$((drop_failures+1))
+            fi
+            if ! cargo test --manifest-path custody/Cargo.toml --locked --test process explicit_unlock_reacquire_128_with_competing_process -- --exact --quiet; then
+              explicit_failures=$((explicit_failures+1))
+            fi
+          done
+          echo "STY_G2_05D_UNTRACED_AB drop_failures=$drop_failures explicit_failures=$explicit_failures trials=16"
+          test "$drop_failures" -eq 0 && test "$explicit_failures" -eq 0
       # Temporary PR-only forensic step; REMOVE before accepting G2-05d.
       - name: Diagnose Linux flock syscall history after an ownership failure
         if: failure() && runner.os == 'Linux' && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
