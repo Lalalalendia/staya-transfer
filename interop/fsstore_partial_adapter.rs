@@ -44,6 +44,15 @@ pub async fn stage_verified_fixture(
     if expected.profile != BaoStorageProfile::IrohBlobs0103PreOrder16KiB {
         return Err("unsupported Bao profile".to_owned());
     }
+    // Durable partial storage requires complete 16 KiB Bao chunk groups.
+    // Direct in-memory GET may use unaligned byte intervals, but do not stage
+    // their incomplete boundary groups as independently recoverable.
+    const GROUP_BYTES: u64 = 16 * 1024;
+    if range.start() % GROUP_BYTES != 0
+        || (range.end() != expected.manifest.size && range.end() % GROUP_BYTES != 0)
+    {
+        return Err("partial storage range is not Bao-group aligned".to_owned());
+    }
     if wire.len() < 8 || wire.len() > MAX_BAO_PROOF_BYTES + 8 {
         return Err("wire response length out of bounds".to_owned());
     }
