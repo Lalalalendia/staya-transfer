@@ -149,3 +149,6 @@ impl StoreLease {
 
 /// Cooperative in-memory admission accounting; no real disk quota.
 pub mod admission;
+
+/// Quiescent partial-file logical budget, NOT a physical disk quota.
+pub mod disk_budget;
