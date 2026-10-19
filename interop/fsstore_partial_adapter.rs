@@ -10,7 +10,7 @@ use bao_tree::{
 };
 use iroh_blobs::{
     Hash,
-    protocol::{ChunkRanges, ChunkRangesExt},
+    protocol::ChunkRangesExt,
     store::fs::FsStore,
 };
 use staya_transfer::{
