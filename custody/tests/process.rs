@@ -199,6 +199,71 @@ fn repeated_drop_and_reacquire_has_no_stale_lock_descriptor() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Linux-only, diagnostic experiment: compare uncontended lease turnover
+/// against the same operation while a distinct thread repeatedly spawns
+/// unrelated OS processes. A forked child may transiently retain an inherited
+/// open file description before exec closes CLOEXEC descriptors. This is an
+/// inference to TEST, not a claimed explanation for the existing EWOULDBLOCK.
+///
+/// The subprocesses touch a DIFFERENT, private directory. No busy error is
+/// swallowed by production code: the required 128-cycle regression remains
+/// unchanged and independently failing CI still blocks this Draft PR.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_unrelated_spawn_interference_diagnostic() {
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    fn count_busy(root: &Path, cycles: usize) -> usize {
+        let mut busy = 0;
+        for _ in 0..cycles {
+            match StoreLease::acquire(root) {
+                Ok(lease) => {
+                    lease.validate_fence().expect("stable private root");
+                    drop(lease);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => busy += 1,
+                Err(err) => panic!("unexpected acquisition error: {err:?}"),
+            }
+        }
+        busy
+    }
+
+    let root = private_root("unrelated-spawn-target");
+    let unrelated_root = private_root("unrelated-spawn-child");
+    let baseline_busy = count_busy(&root, 1024);
+
+    let started = Arc::new(Barrier::new(2));
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_started = Arc::clone(&started);
+    let thread_stop = Arc::clone(&stop);
+    let spawner = std::thread::spawn(move || {
+        thread_started.wait();
+        let mut subprocesses = 0;
+        while !thread_stop.load(Ordering::Acquire) {
+            let result = worker("probe", &unrelated_root);
+            assert_eq!(stdout_text(&result), "ACQUIRED");
+            subprocesses += 1;
+        }
+        fs::remove_dir_all(unrelated_root).expect("remove unrelated private root");
+        subprocesses
+    });
+
+    started.wait();
+    let spawn_busy = count_busy(&root, 8192);
+    stop.store(true, Ordering::Release);
+    let subprocesses = spawner.join().expect("unrelated subprocess test thread");
+    println!(
+        "STY_G2_05D_LINUX_SPAWN_AB baseline_wouldblock={baseline_busy} spawn_wouldblock={spawn_busy} unrelated_subprocesses={subprocesses} cycles_baseline=1024 cycles_spawn=8192"
+    );
+    assert!(subprocesses > 0, "spawn-stress condition must be exercised");
+    // Zero observed contention is inconclusive; a nonzero number would
+    // independently reproduce the issue under concurrent, unrelated spawn.
+    fs::remove_dir_all(root).expect("remove target private root");
+}
+
 /// An explicit LOCK_UN experiment; does not replace or silence the separate
 /// Drop-only 128-cycle stress test. Both must be reported independently.
 #[test]
