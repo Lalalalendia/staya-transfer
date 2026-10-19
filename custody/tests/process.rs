@@ -1,3 +1,4 @@
+use staya_custody_lab::StoreLease;
 use std::{
     fs,
     io::{BufRead, BufReader},
@@ -5,7 +6,6 @@ use std::{
     process::{Child, Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
-use staya_custody_lab::StoreLease;
 
 fn private_root(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -46,7 +46,9 @@ fn two_processes_and_normal_release() {
     let root = private_root("normal");
     let lease = StoreLease::acquire(&root).expect("first owner");
     assert_eq!(stdout_text(&worker("probe", &root)), "BUSY");
-    lease.validate_fence().expect("owner still owns same identity");
+    lease
+        .validate_fence()
+        .expect("owner still owns same identity");
     drop(lease);
 
     // A stale lockfile still exists but MUST NOT block a new real OS owner.
@@ -115,7 +117,9 @@ fn directory_replacement_invalidates_prior_lease() {
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(moved).unwrap();
     } else {
-        lease.validate_fence().expect("OS prevents moved open directory");
+        lease
+            .validate_fence()
+            .expect("OS prevents moved open directory");
         drop(lease);
         fs::remove_dir_all(root).unwrap();
     }

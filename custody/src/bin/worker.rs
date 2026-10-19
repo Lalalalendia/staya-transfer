@@ -1,6 +1,10 @@
 //! A separate OS process used to verify real file-lock ownership semantics.
-use std::{env, io::{self, Read, Write}, process};
 use staya_custody_lab::StoreLease;
+use std::{
+    env,
+    io::{self, Read, Write},
+    process,
+};
 
 fn main() {
     let mut args = env::args().skip(1);
