@@ -22,6 +22,10 @@ const PAYLOAD_BYTES: usize = 76;
 const RECORD_BYTES: usize = PAYLOAD_BYTES + 32;
 /// Absolute upper bound until G2-05 quotas and retirement are implemented.
 pub const MAX_CLAIMS: u64 = 128;
+/// Bounded number of interrupted, unpublished checkpoints in one private store.
+pub const MAX_PENDING_CLAIMS: usize = 32;
+/// Bound top-level directory scans even if irrelevant or malicious names exist.
+pub const MAX_ROOT_ENTRIES: usize = 512;
 /// The tested pinned 0.103.1 pre-order Bao encoding, 16 KiB groups.
 pub const IROH_PREORDER_16K: u32 = 1;
 
@@ -141,6 +145,111 @@ fn validate_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Fail closed on private-root directory explosion, malformed pending paths and
+/// unexpected pending sizes BEFORE inspecting trusted checkpoint candidates.
+///
+/// A pending record is NEVER a verified/committed generation. There is no
+/// automatic deletion, even when an interrupted process left a valid prefix.
+/// The caller must hold the cooperative OS lease; hostile path races remain
+/// outside this lab until fd-relative and Windows HANDLE-relative custody.
+fn bounded_pending_records(owner: &StoreLease) -> io::Result<Vec<(std::path::PathBuf, u64)>> {
+    owner.validate_fence()?;
+    let mut scanned = 0usize;
+    let mut pending = Vec::new();
+    let mut pending_bytes = 0u64;
+    for entry in fs::read_dir(owner.canonical_root())? {
+        let entry = entry?;
+        scanned += 1;
+        if scanned > MAX_ROOT_ENTRIES {
+            return Err(invalid("private checkpoint root entry quota exceeded"));
+        }
+        let filename = entry.file_name();
+        let Some(name) = filename.to_str() else {
+            continue;
+        };
+        if !name.starts_with(TEMP_PREFIX) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(invalid("pending checkpoint is not a regular file"));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err(invalid("pending checkpoint Windows reparse point"));
+            }
+        }
+        // Partially-written records must be no larger than the fixed record.
+        // Never allocate memory proportional to a recovered filename or length.
+        if metadata.len() > RECORD_BYTES as u64 {
+            return Err(invalid("pending checkpoint length exceeds fixed record"));
+        }
+        pending_bytes = pending_bytes
+            .checked_add(metadata.len())
+            .ok_or_else(|| invalid("pending checkpoint size overflow"))?;
+        if pending_bytes > (MAX_PENDING_CLAIMS * RECORD_BYTES) as u64 {
+            return Err(invalid("pending checkpoint byte budget exceeded"));
+        }
+        pending.push((path, metadata.len()));
+        if pending.len() > MAX_PENDING_CLAIMS {
+            return Err(invalid("pending checkpoint count exceeded"));
+        }
+    }
+    owner.validate_fence()?;
+    Ok(pending)
+}
+
+/// Bounded cleanup of only unpublished .staya-cp-tmp-* names in a cooperative,
+/// private, *quiescent* checkpoint directory. Never touches FsStore blob files,
+/// the custody lock, or published checkpoint generations.
+///
+/// This is not safe against malicious concurrent path swaps and does NOT grant
+/// a durable result or resume authority. If bounds/types are violated, remove
+/// NOTHING: the operator must inspect the private directory first. Windows
+/// unlink persistence across sudden power loss is not claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrphanCleanup {
+    pub removed: usize,
+    pub bytes: u64,
+}
+
+pub fn cleanup_pending_records(owner: &StoreLease) -> io::Result<OrphanCleanup> {
+    let candidates = bounded_pending_records(owner)?;
+    let mut outcome = OrphanCleanup {
+        removed: 0,
+        bytes: 0,
+    };
+    for (path, expected_length) in candidates {
+        owner.validate_fence()?;
+        let actual = fs::symlink_metadata(&path)?;
+        if !actual.is_file()
+            || actual.file_type().is_symlink()
+            || actual.len() != expected_length
+        {
+            return Err(invalid("pending checkpoint changed during cleanup"));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if actual.file_attributes() & 0x400 != 0 {
+                return Err(invalid("pending checkpoint replaced by reparse point"));
+            }
+        }
+        fs::remove_file(&path)?;
+        outcome.removed += 1;
+        outcome.bytes += expected_length;
+    }
+    #[cfg(unix)]
+    {
+        fs::File::open(owner.canonical_root())?.sync_all()?;
+    }
+    owner.validate_fence()?;
+    Ok(outcome)
+}
+
 /// Enumerate **untrusted** metadata candidates from an existing private store.
 /// Every returned entry MUST pass a later independent physical Bao audit before
 /// it can be used by the missing-range scheduler. No VerifiedRanges is returned.
@@ -154,9 +263,17 @@ pub fn read_candidates(
     if trusted_size == 0 || trusted_profile != IROH_PREORDER_16K {
         return Err(invalid("unrecognized trusted checkpoint identity"));
     }
+    // Fail closed on orphan temp floods before interpreting durable claims.
+    // Interrupted temp files are ignored for skip/admission, not for quotas.
+    let _pending = bounded_pending_records(owner)?;
     let mut discovered = Vec::new();
+    let mut scanned = 0usize;
     for entry in fs::read_dir(owner.canonical_root())? {
         let entry = entry?;
+        scanned += 1;
+        if scanned > MAX_ROOT_ENTRIES {
+            return Err(invalid("private checkpoint root entry quota exceeded"));
+        }
         let filename = entry.file_name();
         let Some(name) = filename.to_str() else {
             continue;
