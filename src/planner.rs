@@ -173,19 +173,13 @@ mod tests {
     fn skips_verified_spans_and_covers_each_missing_byte() {
         let mut already = VerifiedCheckpoint::empty(manifest(22));
         already
-
             .verified
-
             .add_verified(ByteRange::new(8, 12, 22).unwrap());
         already
-
             .verified
-
             .add_verified(ByteRange::new(0, 4, 22).unwrap());
         already
-
             .verified
-
             .add_verified(ByteRange::new(17, 22, 22).unwrap());
         let plan = MissingRanges::from_checkpoint(manifest(22), &already, budget(3)).unwrap();
         assert_eq!(
@@ -198,9 +192,7 @@ mod tests {
     fn fully_verified_object_needs_no_download() {
         let mut already = VerifiedCheckpoint::empty(manifest(5));
         already
-
             .verified
-
             .add_verified(ByteRange::new(0, 5, 5).unwrap());
         let plan = MissingRanges::from_checkpoint(manifest(5), &already, budget(1)).unwrap();
         assert_eq!(plan.count(), 0);
@@ -210,9 +202,7 @@ mod tests {
     fn rejects_checkpoint_from_different_content_length() {
         let mut stale = VerifiedCheckpoint::empty(manifest(15));
         stale
-
             .verified
-
             .add_verified(ByteRange::new(0, 15, 15).unwrap());
         assert!(matches!(
             MissingRanges::from_checkpoint(manifest(10), &stale, budget(2)),
@@ -241,9 +231,7 @@ mod tests {
     fn near_u64_max_remains_lazy_without_overflow() {
         let mut already = VerifiedCheckpoint::empty(manifest(u64::MAX));
         already
-
             .verified
-
             .add_verified(ByteRange::new(0, u64::MAX - 10, u64::MAX).unwrap());
         let mut plan =
             MissingRanges::from_checkpoint(manifest(u64::MAX), &already, budget(1024)).unwrap();
@@ -268,14 +256,10 @@ mod tests {
     fn adjacent_verified_spans_are_coalesced() {
         let mut already = VerifiedCheckpoint::empty(manifest(10));
         already
-
             .verified
-
             .add_verified(ByteRange::new(5, 8, 10).unwrap());
         already
-
             .verified
-
             .add_verified(ByteRange::new(2, 5, 10).unwrap());
         let plan = MissingRanges::from_checkpoint(manifest(10), &already, budget(4)).unwrap();
         assert_eq!(plan.map(pair).collect::<Vec<_>>(), [(0, 2), (8, 10)]);
