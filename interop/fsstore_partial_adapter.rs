@@ -44,8 +44,8 @@ pub async fn stage_verified_fixture(
     // Direct in-memory GET may use unaligned byte intervals, but do not stage
     // their incomplete boundary groups as independently recoverable.
     const GROUP_BYTES: u64 = 16 * 1024;
-    if range.start() % GROUP_BYTES != 0
-        || (range.end() != expected.manifest.size && range.end() % GROUP_BYTES != 0)
+    if !range.start().is_multiple_of(GROUP_BYTES)
+        || (range.end() != expected.manifest.size && !range.end().is_multiple_of(GROUP_BYTES))
     {
         return Err("partial storage range is not Bao-group aligned".to_owned());
     }
