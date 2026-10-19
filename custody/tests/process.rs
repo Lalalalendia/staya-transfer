@@ -216,13 +216,17 @@ fn linux_unrelated_spawn_interference_diagnostic() {
         atomic::{AtomicBool, Ordering},
     };
 
-    fn count_busy(root: &Path, cycles: usize) -> usize {
+    fn count_busy(root: &Path, cycles: usize, explicit_release: bool) -> usize {
         let mut busy = 0;
         for _ in 0..cycles {
             match StoreLease::acquire(root) {
                 Ok(lease) => {
                     lease.validate_fence().expect("stable private root");
-                    drop(lease);
+                    if explicit_release {
+                        lease.release().expect("quiescent explicit unlock");
+                    } else {
+                        drop(lease);
+                    }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => busy += 1,
                 Err(err) => panic!("unexpected acquisition error: {err:?}"),
@@ -232,8 +236,9 @@ fn linux_unrelated_spawn_interference_diagnostic() {
     }
 
     let root = private_root("unrelated-spawn-target");
+    let explicit_root = private_root("unrelated-spawn-explicit");
     let unrelated_root = private_root("unrelated-spawn-child");
-    let baseline_busy = count_busy(&root, 1024);
+    let baseline_busy = count_busy(&root, 1024, false);
 
     let started = Arc::new(Barrier::new(2));
     let stop = Arc::new(AtomicBool::new(false));
@@ -252,16 +257,20 @@ fn linux_unrelated_spawn_interference_diagnostic() {
     });
 
     started.wait();
-    let spawn_busy = count_busy(&root, 8192);
+    let spawn_busy = count_busy(&root, 8192, false);
+    // A/B only: release() performs explicit LOCK_UN after quiescence. The
+    // normal Drop-only behavior remains separately required and unchanged.
+    let explicit_busy = count_busy(&explicit_root, 8192, true);
     stop.store(true, Ordering::Release);
     let subprocesses = spawner.join().expect("unrelated subprocess test thread");
     println!(
-        "STY_G2_05D_LINUX_SPAWN_AB baseline_wouldblock={baseline_busy} spawn_wouldblock={spawn_busy} unrelated_subprocesses={subprocesses} cycles_baseline=1024 cycles_spawn=8192"
+        "STY_G2_05D_LINUX_SPAWN_AB baseline_wouldblock={baseline_busy} spawn_wouldblock={spawn_busy} explicit_release_wouldblock={explicit_busy} unrelated_subprocesses={subprocesses} cycles_baseline=1024 cycles_spawn_each=8192"
     );
     assert!(subprocesses > 0, "spawn-stress condition must be exercised");
     // Zero observed contention is inconclusive; a nonzero number would
     // independently reproduce the issue under concurrent, unrelated spawn.
     fs::remove_dir_all(root).expect("remove target private root");
+    fs::remove_dir_all(explicit_root).expect("remove explicit release private root");
 }
 
 /// An explicit LOCK_UN experiment; does not replace or silence the separate
