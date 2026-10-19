@@ -137,12 +137,43 @@ fn alias_of_same_root_does_not_acquire_second_writer() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+fn debug_lock_ownership(root: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let lock = root.join(".staya-writer.lock");
+    let inode = fs::metadata(&lock).ok().map(|m| m.ino());
+    let mut own_fds = Vec::new();
+    if let Ok(entries) = fs::read_dir("/proc/self/fd") {
+        for entry in entries.flatten() {
+            if fs::read_link(entry.path()).ok().as_deref() == Some(lock.as_path()) {
+                own_fds.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    let current_locks = fs::read_to_string("/proc/locks").unwrap_or_default();
+    let inode_token = inode.map(|id| format!(":{id} ")).unwrap_or_default();
+    let active = current_locks
+        .lines()
+        .filter(|line| line.contains(&inode_token))
+        .take(8)
+        .collect::<Vec<_>>();
+    format!(
+        "lock={} inode={inode:?} this_process_lock_fds={own_fds:?} proc_locks={active:?}",
+        lock.display()
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn debug_lock_ownership(_root: &Path) -> String {
+    "Linux /proc lock diagnostics unavailable".to_owned()
+}
+
 #[test]
 fn repeated_drop_and_reacquire_has_no_stale_lock_descriptor() {
     let root = private_root("reacquire-128");
     for cycle in 0..128 {
         let lease = StoreLease::acquire(&root)
-            .unwrap_or_else(|err| panic!("reacquire cycle {cycle} failed: {err:?}"));
+            .unwrap_or_else(|err| panic!("reacquire cycle {cycle} failed: {err:?}; {}", debug_lock_ownership(&root)));
         lease.validate_fence().expect("owned physical identity");
         if cycle % 32 == 0 {
             assert_eq!(
