@@ -5,7 +5,7 @@
 //! There is no durable receipt; only separately audited bytes may be reused.
 
 use bao_tree::{
-    BaoTree, BlockSize, ByteRanges, ChunkRanges,
+    BaoTree, BlockSize, ByteRanges,
     io::{outboard::PreOrderOutboard, round_up_to_chunks, sync::valid_ranges},
 };
 use iroh_blobs::{
