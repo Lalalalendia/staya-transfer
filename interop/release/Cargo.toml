@@ -22,6 +22,7 @@ path = "../fsstore_partial_gate.rs"
 
 [dependencies]
 staya-transfer = { path = "../..", features = ["bao"] }
+staya-custody-lab = { path = "../../custody" }
 bao-tree = { version = "=0.16.1", default-features = false, features = ["fs"] }
 blake3 = "=1.8.5"
 iroh = "=1.3.0"
