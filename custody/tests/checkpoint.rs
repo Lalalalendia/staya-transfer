@@ -228,7 +228,10 @@ fn cleanup_unpublished_pending_names_only_and_requires_uncontested_owner() {
     assert_eq!(cleaned.removed, 2);
     assert_eq!(cleaned.bytes, 4);
     assert!(!temp_a.exists() && !temp_b.exists());
-    assert_eq!(fs::read(path.join("do-not-remove.txt")).unwrap(), b"ordinary file");
+    assert_eq!(
+        fs::read(path.join("do-not-remove.txt")).unwrap(),
+        b"ordinary file"
+    );
     assert_eq!(candidates(&lease), vec![claim(1)]);
     drop(lease);
     let reopened = StoreLease::acquire(&path).unwrap();
