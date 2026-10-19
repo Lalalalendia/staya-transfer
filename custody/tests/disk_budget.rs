@@ -3,20 +3,23 @@
 //! NOT a full-disk write inside the upstream FsStore actor.
 
 #[cfg(target_os = "linux")]
-use staya_custody_lab::partial_barrier::{PartialPaths, publish_after_quiescent_audit};
+use staya_custody_lab::{
+    checkpoint::{CheckpointClaim, IROH_PREORDER_16K, read_candidates},
+    partial_barrier::{PartialPaths, publish_after_quiescent_audit},
+};
 use staya_custody_lab::{
     StoreLease,
-    checkpoint::{CheckpointClaim, IROH_PREORDER_16K, read_candidates},
     disk_budget::{DiskLimits, inspect_quiescent_partial_files},
 };
 #[cfg(target_os = "linux")]
 use std::io::Write;
 use std::{
-    fs, io,
+    fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(target_os = "linux")]
 const ROOT: [u8; 32] = [0x61; 32];
 
 fn private_root() -> PathBuf {
