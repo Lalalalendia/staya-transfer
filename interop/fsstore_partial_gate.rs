@@ -785,7 +785,7 @@ async fn real_fsstore_os_process_supervisor_clean_and_kill() {
                 "CLOSE"
             )
             .expect("request clean actor shutdown");
-            child.0.stdin.take(); // EOF after CLOSE
+            drop(child.0.stdin.take()); // EOF after CLOSE
             assert!(
                 await_exit(&mut child.0).success(),
                 "clean worker must exit after actor shutdown"
