@@ -35,6 +35,18 @@ fn main() {
             let _ = io::stdin().read(&mut buf);
         }
         "probe" => {}
+        "checkpoint-read" => {
+            // Metadata readback from another real OS process is still only
+            // a claim inventory, NEVER independently verified Bao bytes.
+            let claims = staya_custody_lab::checkpoint::read_candidates(
+                &guard,
+                [0x42; 32],
+                1_048_593,
+                staya_custody_lab::checkpoint::IROH_PREORDER_16K,
+            )
+            .expect("independent checkpoint candidate read");
+            println!("CANDIDATES={}", claims.len());
+        }
         _ => process::exit(4),
     }
 }

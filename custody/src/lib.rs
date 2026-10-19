@@ -6,6 +6,8 @@
 //! guarantee fsync, or stop a malicious writer who ignores advisory locks.
 //! A change of lockfile or directory identity must prevent further admission.
 
+pub mod checkpoint;
+
 use same_file::Handle;
 use std::{
     fs::{self, File, Metadata, OpenOptions},
