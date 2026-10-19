@@ -397,7 +397,6 @@ async fn real_fsstore_admission_rejects_before_write_and_releases_after_stage() 
     .expect("bounded G2-05f real FsStore fixture");
 }
 
-
 #[tokio::test(flavor = "multi_thread")]
 async fn clean_reopen_authenticated_range_controls_missing_inventory() {
     use staya_transfer::{
