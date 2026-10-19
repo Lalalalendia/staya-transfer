@@ -9,21 +9,21 @@ use bao_tree::{
     io::{outboard::PreOrderOutboard, round_up_to_chunks, sync::valid_ranges},
 };
 use iroh_blobs::{Hash, protocol::ChunkRangesExt, store::fs::FsStore};
+use staya_custody_lab::{
+    StoreLease,
+    admission::{InflightPermit, Reservation, SharedAdmission},
+};
 use staya_transfer::{
     ByteRange, TransferRequest,
     bao::{MAX_BAO_PROOF_BYTES, verify_bao_range},
     recovery::{BaoStorageProfile, StoreIdentity},
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     fs,
     io::{Read, Seek, SeekFrom},
     path::Path,
 };
-use staya_custody_lab::{
-    StoreLease,
-    admission::{InflightPermit, Reservation, SharedAdmission},
-};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 const BLOCK: BlockSize = BlockSize::from_chunk_log(4);
 
@@ -104,8 +104,8 @@ pub async fn stage_with_inflight_budget(
     if cancelled.load(Ordering::Acquire) {
         return Err("import cancelled before store admission".to_owned());
     }
-    let wire_size = u64::try_from(wire.len())
-        .map_err(|_| "incoming Bao proof length cannot fit accounting")?;
+    let wire_size =
+        u64::try_from(wire.len()).map_err(|_| "incoming Bao proof length cannot fit accounting")?;
     let logical_bytes = range
         .len()
         .checked_add(wire_size)
