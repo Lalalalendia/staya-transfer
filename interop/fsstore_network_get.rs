@@ -265,7 +265,8 @@ async fn direct_quic_get_bao_peer_policy_reconnect() {
         worker.abort();
         drop(retained);
         drop(forbidden_tag);
-        store.shutdown().await.expect("close private provider store");
+        // Router::shutdown delegates to BlobsProtocol::shutdown and already
+        // closes this FsStore. A second RPC shutdown can return OneshotClosed.
         drop(store);
         fs::remove_dir_all(&root).expect("remove only owned private fixture");
         println!(
