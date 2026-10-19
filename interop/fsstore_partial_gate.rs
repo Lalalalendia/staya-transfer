@@ -396,3 +396,75 @@ async fn real_fsstore_admission_rejects_before_write_and_releases_after_stage() 
     .await
     .expect("bounded G2-05f real FsStore fixture");
 }
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clean_reopen_authenticated_range_controls_missing_inventory() {
+    use staya_transfer::{
+        TransferBudget, TransferRequest,
+        bao::verify_bao_range,
+        planner::{MissingRanges, VerifiedCheckpoint},
+    };
+    tokio::time::timeout(TIMEOUT, async {
+        let dir = std::env::temp_dir().join(format!(
+            "staya-g2-06a-{}-{}",
+            std::process::id(),
+            std::env::var("STY_INTEROP_VARIANT").unwrap_or_else(|_| "ci".to_owned())
+        ));
+        assert!(!dir.exists());
+        fs::create_dir(&dir).unwrap();
+        let lease = StoreLease::acquire(&dir).unwrap();
+        let data = make_data();
+        let (identity, proof) = prepare(&data);
+        let store = FsStore::load(&dir).await.unwrap();
+        stage_verified_fixture(&store, identity, range(), &proof).await.unwrap();
+        store.shutdown().await.unwrap();
+        drop(store);
+        let physical = audit_clean_closed_fixture(&dir, identity, range()).unwrap();
+        assert_eq!(physical, data[START as usize..END as usize]);
+
+        let trusted_manifest = identity.manifest;
+        let request = TransferRequest::new(trusted_manifest, range()).unwrap();
+        let validated = verify_bao_range(&request, &proof[8..]).unwrap();
+        assert_eq!(validated.bytes(), physical.as_slice());
+        let mut confirmed = VerifiedCheckpoint::empty(trusted_manifest);
+        confirmed.record_bao(validated).unwrap();
+        let budget = TransferBudget {
+            max_inflight_bytes: 1024 * 1024,
+            max_sources: 1,
+            max_retries: 0,
+        };
+        let wanted: Vec<_> = MissingRanges::from_checkpoint(trusted_manifest, &confirmed, budget)
+            .unwrap()
+            .map(|r| (r.start(), r.end()))
+            .collect();
+        assert_eq!(wanted.first().copied(), Some((0, START)));
+        assert!(wanted.iter().all(|&(a, b)| b <= START || a >= END));
+        assert_eq!(wanted.iter().map(|(a, b)| b - a).sum::<u64>(),
+                   trusted_manifest.size - (END - START));
+
+        let data_path = dir
+            .join("data")
+            .join(format!("{}.data", Hash::from_bytes(identity.manifest.id.0).to_hex()));
+        let mut file = fs::OpenOptions::new().write(true).open(data_path).unwrap();
+        file.seek(SeekFrom::Start(START)).unwrap();
+        file.write_all(&[data[START as usize] ^ 0x80]).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert!(audit_clean_closed_fixture(&dir, identity, range()).is_err());
+        // Failed physical audit must yield an EMPTY inventory, never a skip.
+        let empty = VerifiedCheckpoint::empty(trusted_manifest);
+        let full: u64 = MissingRanges::from_checkpoint(trusted_manifest, &empty, budget)
+            .unwrap()
+            .map(|r| r.len())
+            .sum();
+        assert_eq!(full, trusted_manifest.size);
+        drop(lease);
+        fs::remove_dir_all(dir).unwrap();
+        println!(
+            "STY_G2_06A clean_shutdown=true physical_bao=true safe_missing_inventory=true corrupted_storage_full_retry=true crash_resume=false network_get=false file_gate=false"
+        );
+    })
+    .await
+    .expect("bounded G2-06a clean-reopen inventory test");
+}

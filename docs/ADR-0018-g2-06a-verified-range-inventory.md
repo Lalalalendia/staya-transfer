@@ -1,0 +1,5 @@
+# STY-G2-06a — independent safe range-planning laboratory
+
+Subtest of [STY-G2-06 issue #23](https://github.com/Lalalalendia/staya-transfer/issues/23). A pinned release/fork real FsStore receives a locally authenticated Bao range. After **clean shutdown** the fixture independently reads actual sparse physical data and Bao outboard. A separate fresh `verify_bao_range` proof must agree byte-for-byte with physical readback before `VerifiedCheckpoint::record_bao` is permitted. The missing-range scheduler must exclude exactly that known range. Corrupting one stored byte must fail physical Bao audit, and an empty checkpoint must schedule the full object again.
+
+**This is not G2-06 full acceptance:** trusted fixture proof is supplied locally; this test does not perform actual second QUIC GET, SIGKILL/TerminateProcess handoff, process-owned durable journal, or reassembly/full BLAKE3 root of the completed transfer. Nothing here authorizes File Gate or Akula Vault changes. The Linux custody problem PR #17 and stacked actor quiescence PR #24 remain independent blockers. Zero of the seven independent G2-06 rows is closed by this narrow test alone.

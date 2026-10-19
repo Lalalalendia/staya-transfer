@@ -50,6 +50,10 @@ jobs:
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_admission_rejects_before_write_and_releases_after_stage --nocapture
+      - name: STY-G2-06a authenticated missing-range inventory after clean reopen
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact clean_reopen_authenticated_range_controls_missing_inventory --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
