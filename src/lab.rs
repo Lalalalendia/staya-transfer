@@ -12,6 +12,8 @@ pub const MAX_LAB_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_LAB_INFLIGHT_BYTES: u64 = 1024 * 1024;
 pub const MAX_LAB_SOURCES: usize = 16;
 pub const MAX_LAB_RETRIES: u32 = 8;
+/// Bound the number of distinct range requests, even when chunks are tiny.
+pub const MAX_LAB_RANGES: u64 = 4096;
 
 /// Test double for a range source that fills a caller-owned bounded buffer.
 /// An adapter MUST cap its network read and reject overlong wire frames:
@@ -83,6 +85,10 @@ pub fn fetch_complete<S: RangeSource, C: Cancellation>(
         return Err(TransferError::InvalidBudget);
     }
     if sources.is_empty() || sources.len() > budget.max_sources {
+        return Err(TransferError::InvalidBudget);
+    }
+    let request_count = 1 + (manifest.size - 1) / budget.max_inflight_bytes;
+    if request_count > MAX_LAB_RANGES {
         return Err(TransferError::InvalidBudget);
     }
     let mut result = Vec::with_capacity(manifest.size as usize);
@@ -338,6 +344,26 @@ mod tests {
         let mut no_sources: [MockSource; 0] = [];
         assert!(matches!(
             fetch_complete(manifest(data), budget(), &mut no_sources, &NeverCancel),
+            Err(TransferError::InvalidBudget)
+        ));
+        assert_eq!(source[0].calls, 0);
+    }
+
+    #[test]
+    fn tiny_chunks_cannot_cause_unbounded_range_request_fanout() {
+        let data = b"no network reads for invalid request counts";
+        let mut source = [MockSource::new(data)];
+        let limits = TransferBudget {
+            max_inflight_bytes: 1,
+            max_sources: 1,
+            max_retries: 8,
+        };
+        let huge = Manifest {
+            id: manifest(data).id,
+            size: MAX_LAB_RANGES + 1,
+        };
+        assert!(matches!(
+            fetch_complete(huge, limits, &mut source, &NeverCancel),
             Err(TransferError::InvalidBudget)
         ));
         assert_eq!(source[0].calls, 0);
