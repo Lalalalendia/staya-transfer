@@ -193,9 +193,6 @@ mod tests {
             size: 3,
         };
         let r = ByteRange::new(0, 4, 4).unwrap();
-        assert_eq!(
-            TransferRequest::new(m, r),
-            Err(TransferError::InvalidRange)
-        );
+        assert_eq!(TransferRequest::new(m, r), Err(TransferError::InvalidRange));
     }
 }
