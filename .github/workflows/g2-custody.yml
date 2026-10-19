@@ -59,6 +59,29 @@ jobs:
           done
           echo "STY_G2_05D_UNTRACED_AB drop_failures=$drop_failures explicit_failures=$explicit_failures trials=16"
           test "$drop_failures" -eq 0 && test "$explicit_failures" -eq 0
+      # Controlled A/B for test-runner concurrency. The exact same process
+      # integration suite is run serially and with default parallel test threads.
+      # Do not hide failures by switching the required suite to serial mode.
+      - name: Diagnose serial versus parallel process-test interference
+        if: always() && runner.os == 'Linux' && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        shell: bash
+        run: |
+          serial_failures=0
+          parallel_failures=0
+          for trial in $(seq 1 8); do
+            if ! cargo test --manifest-path custody/Cargo.toml --locked --test process -- --test-threads=1 > "$RUNNER_TEMP/staya-serial-$trial.log" 2>&1; then
+              serial_failures=$((serial_failures+1))
+              echo "STY_G2_05D_SERIAL_FAIL trial=$trial"
+              tail -n 28 "$RUNNER_TEMP/staya-serial-$trial.log"
+            fi
+            if ! cargo test --manifest-path custody/Cargo.toml --locked --test process > "$RUNNER_TEMP/staya-parallel-$trial.log" 2>&1; then
+              parallel_failures=$((parallel_failures+1))
+              echo "STY_G2_05D_PARALLEL_FAIL trial=$trial"
+              tail -n 28 "$RUNNER_TEMP/staya-parallel-$trial.log"
+            fi
+          done
+          echo "STY_G2_05D_THREAD_AB serial_failures=$serial_failures parallel_failures=$parallel_failures trials=8"
+          test "$serial_failures" -eq 0 && test "$parallel_failures" -eq 0
       # Temporary PR-only forensic step; REMOVE before accepting G2-05d.
       - name: Diagnose Linux flock syscall history after an ownership failure
         if: failure() && runner.os == 'Linux' && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
