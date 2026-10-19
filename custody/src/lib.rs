@@ -97,6 +97,7 @@ impl StoreLease {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&lock_path)?;
         let lock_identity = Handle::from_file(file.try_clone()?)?;
         file.try_lock().map_err(io::Error::from)?;
