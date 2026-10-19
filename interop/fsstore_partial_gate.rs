@@ -406,6 +406,21 @@ async fn clean_reopen_authenticated_range_controls_missing_inventory() {
         planner::{MissingRanges, VerifiedCheckpoint},
     };
     tokio::time::timeout(TIMEOUT, async {
+        if let Some(root) = std::env::var_os("STY_G2_06A_COLD_AUDIT_ROOT") {
+            let root = std::path::PathBuf::from(root);
+            let lease = StoreLease::acquire(&root)
+                .expect("cold OS process must independently own store");
+            let source = make_data();
+            let (trusted, _) = prepare(&source);
+            let physical = audit_clean_closed_fixture(&root, trusted, range())
+                .expect("independent process reads and Bao-authenticates physical sidecars");
+            assert_eq!(physical, source[START as usize..END as usize]);
+            drop(lease);
+            println!(
+                "STY_G2_06A_COLD_AUDIT independent_process=true physical_bao=true checkpoint_trusted=false"
+            );
+            return;
+        }
         let dir = std::env::temp_dir().join(format!(
             "staya-g2-06a-{}-{}",
             std::process::id(),
@@ -420,6 +435,25 @@ async fn clean_reopen_authenticated_range_controls_missing_inventory() {
         stage_verified_fixture(&store, identity, range(), &proof).await.unwrap();
         store.shutdown().await.unwrap();
         drop(store);
+        // Prove cold readback by a separate OS process, not merely a second
+        // function call using in-memory FsStore handles. The child acquires
+        // exclusive custody and audits the physical .data/.obao4 files.
+        drop(lease);
+        let cold = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("clean_reopen_authenticated_range_controls_missing_inventory")
+            .arg("--nocapture")
+            .env("STY_G2_06A_COLD_AUDIT_ROOT", &dir)
+            .output()
+            .expect("start independent cold-reopen verifier");
+        let cold_stdout = String::from_utf8_lossy(&cold.stdout);
+        assert!(
+            cold.status.success() && cold_stdout.contains("STY_G2_06A_COLD_AUDIT"),
+            "cold audit process failed: stdout={cold_stdout} stderr={}",
+            String::from_utf8_lossy(&cold.stderr)
+        );
+        let lease = StoreLease::acquire(&dir)
+            .expect("parent reacquires after independent verifier exits");
         let physical = audit_clean_closed_fixture(&dir, identity, range()).unwrap();
         assert_eq!(physical, data[START as usize..END as usize]);
 
@@ -462,7 +496,7 @@ async fn clean_reopen_authenticated_range_controls_missing_inventory() {
         drop(lease);
         fs::remove_dir_all(dir).unwrap();
         println!(
-            "STY_G2_06A clean_shutdown=true physical_bao=true safe_missing_inventory=true corrupted_storage_full_retry=true crash_resume=false network_get=false file_gate=false"
+            "STY_G2_06A clean_shutdown=true cold_process=true physical_bao=true safe_missing_inventory=true corrupted_storage_full_retry=true crash_resume=false network_get=false file_gate=false"
         );
     })
     .await
