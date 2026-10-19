@@ -730,7 +730,9 @@ async fn real_fsstore_os_process_supervisor_clean_and_kill() {
         }
     }
 
-    for clean in [true, false] {
+    // Third path deliberately loses the parent IPC channel without a CLOSE.
+    // This models a broken transport, not a proven parent process death.
+    for (clean, broken_control) in [(true, false), (false, false), (false, true)] {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -790,6 +792,15 @@ async fn real_fsstore_os_process_supervisor_clean_and_kill() {
                 await_exit(&mut child.0).success(),
                 "clean worker must exit after actor shutdown"
             );
+        } else if broken_control {
+            // An unexpected control-channel EOF must not be mistaken for
+            // CLEAN. The worker fails, its OS process exits, and the
+            // supervisor reaps it before any independent custody attempt.
+            drop(child.0.stdin.take());
+            assert!(
+                !await_exit(&mut child.0).success(),
+                "lost parent control channel must fail closed"
+            );
         } else {
             // Linux SIGKILL / Windows TerminateProcess. This is NOT fsync,
             // durable ACK or a guarantee partial Bao survived power-loss.
@@ -842,7 +853,13 @@ async fn real_fsstore_os_process_supervisor_clean_and_kill() {
             "STY_G2_05H3A child_process=true mode={} join_confirmed=true \
              reacquire_after_exit=true checkpoint_published=false \
              clean_bao_verified={} kill_is_not_durable_ack=true file_gate=false",
-            if clean { "clean" } else { "kill" },
+            if clean {
+                "clean"
+            } else if broken_control {
+                "broken_control"
+            } else {
+                "kill"
+            },
             clean
         );
     }
