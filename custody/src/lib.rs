@@ -142,3 +142,6 @@ impl StoreLease {
         &self.canonical_root
     }
 }
+
+/// Experimental crash-consistent checkpoint claims; not verified ranges.
+pub mod checkpoint;
