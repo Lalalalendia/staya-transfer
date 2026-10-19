@@ -146,3 +146,6 @@ impl StoreLease {
         &self.canonical_root
     }
 }
+
+/// Cooperative in-memory admission accounting; no real disk quota.
+pub mod admission;
