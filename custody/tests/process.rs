@@ -344,6 +344,61 @@ fn inherited_lock_description_survives_parent_close_until_child_exit() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// This is a negative safety gate: an explicit LOCK_UN on one duplicated
+/// open file description releases the exclusive lock while a child still
+/// holds the description. Never call StoreLease::release while a writer is
+/// active (including an inherited child). The child is a real OS process;
+/// the reader probes are independent processes, not threads.
+#[cfg(target_os = "linux")]
+#[test]
+fn explicit_unlock_while_child_inherits_descriptor_allows_premature_second_owner() {
+    use std::fs::OpenOptions;
+    let root = private_root("premature-unlock");
+    let lock_path = root.join(".staya-writer.lock");
+    let owner = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .expect("fresh private lockfile");
+    owner.try_lock().expect("parent exclusive lock");
+    let child_stdin = owner.try_clone().expect("same locked open description");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_staya-custody-worker"))
+        .arg("hold-inherited-fd")
+        .arg(&root)
+        .stdin(Stdio::from(child_stdin))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn inherited lock holder");
+    let mut ready = String::new();
+    BufReader::new(child.stdout.take().expect("child stdout"))
+        .read_line(&mut ready)
+        .expect("read child ready marker");
+    assert_eq!(ready.trim(), "INHERITED_FD_READY");
+    assert_eq!(stdout_text(&worker("probe", &root)), "BUSY");
+
+    // The child deliberately remains alive with a duplicate of the locked
+    // description. LOCK_UN releases the lock globally, not just for parent.
+    owner.unlock().expect("test-only explicit unlock");
+    assert!(
+        child.try_wait().expect("child status").is_none(),
+        "inherited holder must still be alive during premature takeover"
+    );
+    assert_eq!(
+        stdout_text(&worker("probe", &root)),
+        "ACQUIRED",
+        "LOCK_UN must expose premature takeover risk with a live child"
+    );
+    child.kill().expect("stop inherited descriptor holder");
+    child.wait().expect("reap child");
+    drop(owner);
+    fs::remove_dir_all(root).unwrap();
+    println!(
+        "STY_G2_05D_PREMATURE_UNLOCK inherited_child_alive=true second_owner_acquired=true production_unlock_without_quiescence=DENIED"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn symbolic_link_alias_is_denied() {
