@@ -25,9 +25,29 @@ use std::{path::Path, sync::atomic::AtomicBool};
 /// Only this wrapper receives the owned FsStore instance and OS custody.
 /// Neither the actor nor the exclusive lock is exposed to an import caller.
 pub struct ActiveFsStore {
-    owner: StoreLease,
-    actor: FsStore,
+    // Option permits a clean, proof-carrying transition to Quiescent without
+    // allowing an unexpected Drop to close custody while the actor may live.
+    owner: Option<StoreLease>,
+    actor: Option<FsStore>,
     admissions: SharedAdmission,
+}
+
+impl Drop for ActiveFsStore {
+    fn drop(&mut self) {
+        // A cancelled async shutdown, panic or accidental early session Drop
+        // must NOT give another cooperative process the same store while the
+        // pinned actor could still be running. Keep OS custody until process
+        // exit rather than releasing it without a successful shutdown.
+        //
+        // Intentional fail-closed resource leak, experimental only. Production
+        // must add a supervised abort/join path to eventually reclaim it.
+        if self.actor.is_some() {
+            if let Some(owner) = self.owner.take() {
+                eprintln!("STY_G2_05H2_ABANDONED_ACTIVE_ACTOR custody_retained_until_exit=true");
+                std::mem::forget(owner);
+            }
+        }
+    }
 }
 
 pub struct ClosingFsStore {
@@ -56,8 +76,8 @@ impl ActiveFsStore {
             .await
             .map_err(|e| format!("load real pinned FsStore: {e}"))?;
         Ok(Self {
-            owner,
-            actor,
+            owner: Some(owner),
+            actor: Some(actor),
             admissions,
         })
     }
@@ -73,9 +93,9 @@ impl ActiveFsStore {
         cancelled: &AtomicBool,
     ) -> Result<(AcceptedIntoUncommittedFsStore, InflightPermit), String> {
         stage_with_inflight_budget(
-            &self.owner,
+            self.owner.as_ref().expect("active custody invariant"),
             &self.admissions,
-            &self.actor,
+            self.actor.as_ref().expect("active FsStore invariant"),
             expected,
             range,
             wire,
@@ -114,25 +134,40 @@ impl ClosingFsStore {
                 return Err((self, format!("cannot confirm drained permits: {err}")));
             }
         }
-        if let Err(err) = self.active.owner.validate_fence() {
+        if let Err(err) = self
+            .active
+            .owner
+            .as_ref()
+            .expect("active custody invariant")
+            .validate_fence()
+        {
             return Err((self, format!("physical custody changed before actor shutdown: {err}")));
         }
-        if let Err(err) = self.active.actor.shutdown().await {
+        if let Err(err) = self
+            .active
+            .actor
+            .as_ref()
+            .expect("active FsStore invariant")
+            .shutdown()
+            .await
+        {
             return Err((self, format!("real pinned FsStore shutdown failed: {err}")));
         }
-        if let Err(err) = self.active.owner.validate_fence() {
+        if let Err(err) = self
+            .active
+            .owner
+            .as_ref()
+            .expect("active custody invariant")
+            .validate_fence()
+        {
             return Err((self, format!("physical custody changed after actor shutdown: {err}")));
         }
 
-        let ClosingFsStore {
-            active:
-                ActiveFsStore {
-                    owner,
-                    actor,
-                    admissions,
-                },
-        } = self;
+        let ClosingFsStore { mut active } = self;
+        let actor = active.actor.take().expect("shutdown actor invariant");
         drop(actor);
+        let owner = active.owner.take().expect("shutdown custody invariant");
+        let admissions = active.admissions.clone();
         Ok(QuiescentFsStore { owner, admissions })
     }
 }
