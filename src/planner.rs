@@ -90,41 +90,42 @@ impl Iterator for MissingRanges<'_> {
     type Item = ByteRange;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.cursor < self.manifest.size {
-            while let Some(known) = self.verified.get(self.next_verified) {
-                if self.cursor >= known.end {
-                    self.next_verified += 1;
-                } else if self.cursor >= known.start {
-                    self.cursor = known.end;
-                    self.next_verified += 1;
-                } else {
-                    break;
-                }
-            }
-
-            if self.cursor >= self.manifest.size {
-                return None;
-            }
-
-            let next_known_start = self
-                .verified
-                .get(self.next_verified)
-                .map_or(self.manifest.size, |range| range.start);
-            let end = self
-                .cursor
-                .saturating_add(self.max_range_bytes)
-                .min(next_known_start)
-                .min(self.manifest.size);
-
-            if end == self.cursor {
-                return None;
-            }
-
-            let planned = ByteRange::new(self.cursor, end, self.manifest.size).ok()?;
-            self.cursor = end;
-            return Some(planned);
+        if self.cursor >= self.manifest.size {
+            return None;
         }
-        None
+
+        while let Some(known) = self.verified.get(self.next_verified) {
+            if self.cursor >= known.end {
+                self.next_verified += 1;
+            } else if self.cursor >= known.start {
+                self.cursor = known.end;
+                self.next_verified += 1;
+            } else {
+                break;
+            }
+        }
+
+        if self.cursor >= self.manifest.size {
+            return None;
+        }
+
+        let next_known_start = self
+            .verified
+            .get(self.next_verified)
+            .map_or(self.manifest.size, |range| range.start);
+        let end = self
+            .cursor
+            .saturating_add(self.max_range_bytes)
+            .min(next_known_start)
+            .min(self.manifest.size);
+
+        if end == self.cursor {
+            return None;
+        }
+
+        let planned = ByteRange::new(self.cursor, end, self.manifest.size).ok()?;
+        self.cursor = end;
+        Some(planned)
     }
 }
 
