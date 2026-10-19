@@ -29,3 +29,30 @@ jobs:
       - name: Rustfmt
         run: cargo fmt --all -- --check
         if: always()
+
+  custody-g2-03:
+    if: github.event_name == 'pull_request' && github.head_ref == 'feature/sty-g2-03-single-writer-custody-20261019'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Resolve G2 test harness Cargo.lock
+        shell: bash
+        run: |
+          cargo generate-lockfile --manifest-path custody/Cargo.toml
+          echo STY_G2_CUSTODY_LOCK_BEGIN
+          cat custody/Cargo.lock
+          echo STY_G2_CUSTODY_LOCK_END
+      - name: Rust format
+        run: cargo fmt --manifest-path custody/Cargo.toml --all -- --check
+      - name: Independent process ownership and kill/restart
+        run: cargo test --manifest-path custody/Cargo.toml --locked --all-targets -- --nocapture
+      - name: Deny Clippy warnings
+        run: cargo clippy --manifest-path custody/Cargo.toml --locked --all-targets -- -D warnings
