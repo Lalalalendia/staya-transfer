@@ -12,7 +12,11 @@ path = "src/lib.rs"
 
 [features]
 default = []
+bao = ["dep:bao-tree"]
 
 [dependencies]
 # The standalone STY-G1 mock verifies complete objects, not Bao ranges.
 blake3 = "=1.8.5"
+# Exactly the Bao proof protocol version used by iroh-blobs 0.103.1.
+# Feature-gated to keep the base contracts independent of network libraries.
+bao-tree = { version = "=0.16.0", default-features = false, optional = true }
