@@ -50,3 +50,12 @@ The [missing-range planner](src/planner.rs) lazily schedules missing byte interv
 Nine unit tests cover gaps, duplicates/adjacency, wrong root/size, boundaries, oversized budgets and integer extremes. [ADR-0002](docs/ADR-0002-sty-g1b-range-planner.md) defines the security assumptions.
 
 **Not yet implemented:** actual Bao range verification, Roha connectivity, durable checkpoint persistence, resumed transfer across process restarts or Akula File Gate integration. The synthetic trusted ranges used in unit tests are not evidence of cryptographic verification. No CI pass is assumed until the exact-head run completes.
+
+## STY-G1c: authenticated Bao slice decoding (Draft)
+
+- The optional Rust feature `bao` uses `bao-tree = 0.16.0`, the Bao codec used by `iroh-blobs` 0.103.1, and requires no QUIC integration. The adapter decodes one range in memory against a trusted BLAKE3 full-object root and known size with the 16 KiB iroh group profile.
+- A valid proof yields a `VerifiedBaoRange` with no public unchecked constructor. A `VerifiedCheckpoint` accepts that proof only when the root and size match, and retains the verified bytes inside an 8 MiB per-checkpoint bound. The scheduler can then skip its authenticated intervals.
+- Malicious roots, payload changes, missing or trailing bytes, oversized proofs, cross-object checkpoints and resource exhaustion fail closed. See [ADR-0003](docs/ADR-0003-bao-proof-verification.md).
+- `cargo test --all-targets --all-features` and `cargo clippy --all-targets --all-features -- -D warnings` exercise the feature. CI success must be verified against the exact head SHA; the existence of this code is not a CI pass.
+
+**Not implemented:** persistent checkpoints, crash-safe storage, independent reader/writer process isolation, live Roha/QUIC transfer, peer authorization, or Akula File Gate. The verification code assumes the manifest root and size came from an authorized trusted source; it never grants access by itself.
