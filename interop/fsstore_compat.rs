@@ -1,16 +1,15 @@
 //! Genuine pinned FsStore outboard -> independently verified Staya Bao range.
 //! No network, Akula user content, File Gate or production publication.
 
-use std::{fs, path::PathBuf};
 use bao_tree::{
     BaoTree, BlockSize, ByteRanges,
     io::{outboard::PreOrderOutboard, round_up_to_chunks, sync::encode_ranges_validated},
 };
 use iroh_blobs::{Hash, store::fs::FsStore};
 use staya_transfer::{
-    ByteRange, ContentId, Manifest, TransferError, TransferRequest,
-    bao::verify_bao_range,
+    ByteRange, ContentId, Manifest, TransferError, TransferRequest, bao::verify_bao_range,
 };
+use std::{fs, path::PathBuf};
 
 const DATA_LEN: usize = 8 * 1024 * 1024 + 17;
 const START: u64 = 33_333;
@@ -35,7 +34,10 @@ async fn actual_fsstore_bao_outboard_authenticates_in_staya() {
     let root_hash = Hash::new(&data);
     assert_eq!(*root_hash.as_bytes(), *blake3::hash(&data).as_bytes());
     let store = FsStore::load(&root).await.expect("create FsStore");
-    let tag = store.add_slice(&data).await.expect("add real external data");
+    let tag = store
+        .add_slice(&data)
+        .await
+        .expect("add real external data");
     assert_eq!(tag.hash, root_hash);
     store.shutdown().await.expect("durably close store");
     drop(store);
@@ -69,7 +71,8 @@ async fn actual_fsstore_bao_outboard_authenticates_in_staya() {
             size: DATA_LEN as u64,
         },
         ByteRange::new(START, END, DATA_LEN as u64).unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     let verified = verify_bao_range(&request, &response).unwrap();
     assert_eq!(verified.bytes(), &data[START as usize..END as usize]);
     assert_eq!(verified.manifest(), request.manifest);
@@ -94,7 +97,8 @@ async fn actual_fsstore_bao_outboard_authenticates_in_staya() {
             size: DATA_LEN as u64,
         },
         request.range.clone(),
-    ).unwrap();
+    )
+    .unwrap();
     assert!(matches!(
         verify_bao_range(&wrong, &response),
         Err(TransferError::CorruptData)
@@ -108,9 +112,14 @@ async fn actual_fsstore_bao_outboard_authenticates_in_staya() {
             out.join("manifest.txt"),
             format!(
                 "blake3={}\nsize={}\nstart={}\nend={}\noutboard={}\n",
-                root_hash.to_hex(), DATA_LEN, START, END, parent_len
+                root_hash.to_hex(),
+                DATA_LEN,
+                START,
+                END,
+                parent_len
             ),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     drop(tag);

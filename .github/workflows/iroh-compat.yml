@@ -26,13 +26,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Enforce committed isolated Cargo.lock
+      - name: Enforce pinned G1e Cargo.lock (no dependency re-resolution)
         run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1 > /dev/null
       - name: Real FsStore to Staya Bao verification
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
           STY_INTEROP_OUTPUT_DIR: ${{ github.workspace }}/proof-artifact
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_compat -- --exact actual_fsstore_bao_outboard_authenticates_in_staya --nocapture
+      - name: Check bounded direct QUIC GET, Bao and denial policy
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+          STY_QUIC_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_network_get -- --exact direct_quic_get_bao_peer_policy_reconnect --nocapture
+      - name: Strict G1e formatting and lint
+        run: |
+          cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
+          cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --all-targets -- -D warnings
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wire-${{ matrix.variant }}
+          path: wire-artifact/
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
           name: proof-${{ matrix.variant }}
@@ -61,3 +76,17 @@ jobs:
           cmp proof-output/proof-release/proof.bin proof-output/proof-fork/proof.bin
           cmp proof-output/proof-release/manifest.txt proof-output/proof-fork/manifest.txt
           echo STY_G1D_RELEASE_FORK_BAO_IDENTICAL=true
+  wire-byte-for-byte:
+    needs: fsstore
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wire-*
+          path: wire-output
+      - name: Compare actual raw QUIC GET responses between versions
+        run: |
+          cmp wire-output/wire-release/first.bin wire-output/wire-fork/first.bin
+          cmp wire-output/wire-release/second.bin wire-output/wire-fork/second.bin
+          cmp wire-output/wire-release/manifest.txt wire-output/wire-fork/manifest.txt
+          echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true
