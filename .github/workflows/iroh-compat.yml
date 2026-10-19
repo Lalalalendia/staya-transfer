@@ -50,6 +50,10 @@ jobs:
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_admission_rejects_before_write_and_releases_after_stage --nocapture
+      - name: STY-G2-05g actual pinned FsStore quiescent data budget
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_disk_budget_gate -- --exact real_pinned_fsstore_quiescent_disk_snapshot_has_bounded_refusal --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
