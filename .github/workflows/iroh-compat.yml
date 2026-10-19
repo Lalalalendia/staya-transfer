@@ -41,6 +41,13 @@ jobs:
             proof-artifact/manifest.txt
           if-no-files-found: error
           retention-days: 7
+      - name: Preserve actual Cargo dependency resolution
+        uses: actions/upload-artifact@v4
+        with:
+          name: lock-${{ matrix.variant }}
+          path: interop/${{ matrix.variant }}/Cargo.lock
+          if-no-files-found: error
+          retention-days: 7
   byte-for-byte:
     needs: fsstore
     runs-on: ubuntu-latest
