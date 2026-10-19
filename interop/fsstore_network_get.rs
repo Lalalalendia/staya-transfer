@@ -2,7 +2,14 @@
 //! Only ephemeral direct loopback QUIC, explicit peer and hash authorization.
 //! This does NOT enable Akula user-file access, relay or crash-safe resume.
 
-use std::{fs, time::Duration};
+use std::{
+    fs,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, endpoint::presets, protocol::Router};
 use iroh_blobs::{
     BlobsProtocol, Hash,
@@ -36,7 +43,7 @@ async fn local_endpoint(secret: SecretKey) -> Endpoint {
         .expect("private direct-only loopback endpoint")
 }
 
-fn deny_by_default(allowed_peer: EndpointId, permitted_hash: Hash) -> (EventSender, tokio::task::JoinHandle<()>) {
+fn deny_by_default(allowed_peer: EndpointId, permitted_hash: Hash) -> (EventSender, tokio::task::JoinHandle<()>, Arc<AtomicUsize>) {
     let mask = EventMask {
         connected: ConnectMode::Intercept,
         get: RequestMode::Intercept,
@@ -46,11 +53,16 @@ fn deny_by_default(allowed_peer: EndpointId, permitted_hash: Hash) -> (EventSend
         throttle: ThrottleMode::None,
     };
     let (events, mut rx) = EventSender::channel(64, mask);
+    let refused = Arc::new(AtomicUsize::new(0));
+    let refused_in_worker = Arc::clone(&refused);
     let worker = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
                 ProviderMessage::ClientConnected(msg) => {
                     let allowed = msg.endpoint_id == Some(allowed_peer);
+                    if !allowed {
+                        refused_in_worker.fetch_add(1, Ordering::SeqCst);
+                    }
                     let _ = msg.tx.send(if allowed { Ok(()) } else { Err(AbortReason::Permission) }).await;
                 }
                 ProviderMessage::GetRequestReceived(msg) => {
@@ -64,7 +76,7 @@ fn deny_by_default(allowed_peer: EndpointId, permitted_hash: Hash) -> (EventSend
             }
         }
     });
-    (events, worker)
+    (events, worker, refused)
 }
 
 /// Read an actual QUIC Get response, preserving all Bao proof bytes before
@@ -138,7 +150,7 @@ async fn direct_quic_get_bao_peer_policy_reconnect() {
         let retained = store.add_slice(&data).await.expect("seed authorized file");
         assert_eq!(retained.hash, wanted);
         let forbidden_tag = store.add_slice(b"other forbidden blob").await.expect("seed denied hash");
-        let (events, worker) = deny_by_default(authorized_key.public(), wanted);
+        let (events, worker, refused) = deny_by_default(authorized_key.public(), wanted);
         let endpoint = local_endpoint(server_key).await;
         let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(events)))
@@ -219,6 +231,10 @@ async fn direct_quic_get_bao_peer_policy_reconnect() {
             assert!(result.is_err() || result.unwrap().len() < 8, "unknown peer received bytes");
             untrusted.close(0u8.into(), b"reject outsider");
         }
+        // Connecting to an inaccessible or broken endpoint is NOT evidence of
+        // admission control. Require an explicit provider-side denial event.
+        assert!(refused.load(Ordering::SeqCst) > 0,
+            "unknown endpoint was not explicitly rejected by provider policy");
 
         // Two independent QUIC connections; verified ranges are not persisted.
         connection.close(0u8.into(), b"deliberate reconnect");
