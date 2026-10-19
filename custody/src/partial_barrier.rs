@@ -31,6 +31,7 @@ pub struct PartialPaths {
     pub bitfield: PathBuf,
 }
 
+#[cfg(unix)]
 fn paths(owner: &StoreLease, claim: CheckpointClaim) -> PartialPaths {
     let hex = claim
         .content_root
