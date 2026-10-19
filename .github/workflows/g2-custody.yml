@@ -34,5 +34,26 @@ jobs:
         run: cargo fmt --manifest-path custody/Cargo.toml --all -- --check
       - name: OS-process ownership, hardlink and kill regression tests
         run: cargo test --manifest-path custody/Cargo.toml --locked --all-targets -- --nocapture
+      # Temporary PR-only forensic step; REMOVE before accepting G2-05d.
+      - name: Diagnose Linux flock syscall history after an ownership failure
+        if: failure() && runner.os == 'Linux' && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        shell: bash
+        run: |
+          command -v strace >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq strace)
+          set +e
+          strace -f -tt -e trace=flock,close,dup,dup2,dup3,openat,fcntl -o "$RUNNER_TEMP/staya-g2-05d-flock.trace" \
+            cargo test --manifest-path custody/Cargo.toml --locked --test process repeated_drop_and_reacquire_has_no_stale_lock_descriptor -- --exact --nocapture
+          traced_status=$?
+          set -e
+          echo "STY_G2_05D_STRACE_TEST_EXIT=$traced_status"
+          grep 'flock(' "$RUNNER_TEMP/staya-g2-05d-flock.trace" | tail -n 80 || true
+      - name: Retain diagnostic Linux syscall trace
+        if: failure() && runner.os == 'Linux' && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-g2-05d-flock-trace
+          path: ${{ runner.temp }}/staya-g2-05d-flock.trace
+          if-no-files-found: warn
+          retention-days: 3
       - name: Rust Clippy deny warnings
         run: cargo clippy --manifest-path custody/Cargo.toml --locked --all-targets -- -D warnings
