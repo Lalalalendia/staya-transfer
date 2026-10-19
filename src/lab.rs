@@ -13,10 +13,16 @@ pub const MAX_LAB_INFLIGHT_BYTES: u64 = 1024 * 1024;
 pub const MAX_LAB_SOURCES: usize = 16;
 pub const MAX_LAB_RETRIES: u32 = 8;
 
-/// Test double for an untrusted remote peer returning raw bytes.
-/// Implementations MUST enforce the on-wire byte budget before allocation.
+/// Test double for a range source that fills a caller-owned bounded buffer.
+/// An adapter MUST cap its network read and reject overlong wire frames:
+/// passing a slice does not itself constrain internal remote-client buffers.
+/// The source is trusted adapter CODE, while its remote bytes are untrusted.
 pub trait RangeSource {
-    fn read_range(&mut self, request: &TransferRequest) -> Result<Vec<u8>, TransferError>;
+    fn read_range(
+        &mut self,
+        request: &TransferRequest,
+        output: &mut [u8],
+    ) -> Result<usize, TransferError>;
 }
 
 /// Cancellation is checked before and after each bounded range request.
@@ -90,18 +96,21 @@ pub fn fetch_complete<S: RangeSource, C: Cancellation>(
         let end = cursor + length;
         let range = ByteRange::new(cursor, end, manifest.size)?;
         let request = TransferRequest::new(manifest, range)?;
+        // Never accept a peer-created Vec: the caller owns and bounds memory.
+        // An error drops the private, unverified partial output.
+        let offset = result.len();
+        result.resize(offset + length as usize, 0);
         let mut retries = 0_u32;
         loop {
             if cancel.is_cancelled() {
                 return Err(TransferError::Cancelled);
             }
             let index = (next_source + retries as usize) % sources.len();
-            match sources[index].read_range(&request) {
-                Ok(bytes) => {
-                    if bytes.len() as u64 != length {
+            match sources[index].read_range(&request, &mut result[offset..]) {
+                Ok(written) => {
+                    if written != length as usize {
                         return Err(TransferError::CorruptData);
                     }
-                    result.extend_from_slice(&bytes);
                     break;
                 }
                 Err(TransferError::TransportUnavailable) if retries < budget.max_retries => {
@@ -141,6 +150,7 @@ mod tests {
         unauthorized: bool,
         poison: bool,
         trailing: bool,
+        short: bool,
         calls: usize,
     }
 
@@ -152,13 +162,18 @@ mod tests {
                 unauthorized: false,
                 poison: false,
                 trailing: false,
+                short: false,
                 calls: 0,
             }
         }
     }
 
     impl RangeSource for MockSource {
-        fn read_range(&mut self, request: &TransferRequest) -> Result<Vec<u8>, TransferError> {
+        fn read_range(
+            &mut self,
+            request: &TransferRequest,
+            output: &mut [u8],
+        ) -> Result<usize, TransferError> {
             self.calls += 1;
             if self.unauthorized {
                 return Err(TransferError::Unauthorized);
@@ -169,14 +184,23 @@ mod tests {
             }
             let start = request.range.start() as usize;
             let end = request.range.end() as usize;
-            let mut bytes = self.data[start..end].to_vec();
+            let bytes = self.data.get(start..end).ok_or(TransferError::CorruptData)?;
+            if bytes.len() != output.len() {
+                return Err(TransferError::CorruptData);
+            }
+            output.copy_from_slice(bytes);
             if self.poison {
-                bytes[0] ^= 0x80;
+                output[0] ^= 0x80;
             }
+            // Model a buggy adapter claiming extra wire bytes or returning
+            // a truncated response. Both must be rejected by the caller.
             if self.trailing {
-                bytes.push(0);
+                return Ok(output.len() + 1);
             }
-            Ok(bytes)
+            if self.short {
+                return Ok(output.len() - 1);
+            }
+            Ok(output.len())
         }
     }
 
@@ -219,6 +243,16 @@ mod tests {
         let data = b"complete object";
         let mut source = [MockSource::new(data)];
         source[0].trailing = true;
+        let result = fetch_complete(manifest(data), budget(), &mut source, &NeverCancel);
+        assert!(matches!(result, Err(TransferError::CorruptData)));
+        assert_eq!(source[0].calls, 1);
+    }
+
+    #[test]
+    fn truncated_range_is_rejected_before_full_object_promotion() {
+        let data = b"complete object";
+        let mut source = [MockSource::new(data)];
+        source[0].short = true;
         let result = fetch_complete(manifest(data), budget(), &mut source, &NeverCancel);
         assert!(matches!(result, Err(TransferError::CorruptData)));
         assert_eq!(source[0].calls, 1);
