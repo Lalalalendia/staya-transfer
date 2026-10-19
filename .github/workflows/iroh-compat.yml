@@ -26,13 +26,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Resolve pinned source and package dependencies
-        run: cargo generate-lockfile --manifest-path interop/${{ matrix.variant }}/Cargo.toml
-      - name: Export exact Cargo-generated lockfile to reviewable log
-        run: |
-          echo STY_LOCK_BEGIN
-          cat interop/${{ matrix.variant }}/Cargo.lock
-          echo STY_LOCK_END
+      - name: Enforce committed isolated Cargo.lock
+        run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1 > /dev/null
       - name: Real FsStore to Staya Bao verification
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
