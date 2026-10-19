@@ -1,0 +1,45 @@
+name: STY-G1e real QUIC GET interoperability
+on:
+  pull_request:
+    paths:
+      - 'interop/quic_*'
+      - 'interop/quic-*/**'
+      - '.github/workflows/iroh-quic.yml'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sty-g1e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  quic-get:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [release, fork]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Compile and run actual Iroh QUIC GET
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: |
+          cargo test --manifest-path interop/quic-${{ matrix.variant }}/Cargo.toml --test quic_get -- --exact real_quic_get_proof_verifies_and_unknown_peer_cannot_read --nocapture
+      - name: Show dependency provenance summary
+        shell: bash
+        run: |
+          grep -A2 -E '^name = "(iroh|iroh-blobs|noq|bao-tree)"$' interop/quic-${{ matrix.variant }}/Cargo.lock
+      - name: Upload resolved Cargo.lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: quic-lock-${{ matrix.variant }}
+          path: interop/quic-${{ matrix.variant }}/Cargo.lock
+          if-no-files-found: error
+          retention-days: 7
