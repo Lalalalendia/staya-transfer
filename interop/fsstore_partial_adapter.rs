@@ -5,8 +5,8 @@
 //! There is no durable receipt; only separately audited bytes may be reused.
 
 use bao_tree::{
-    BaoTree, BlockSize, ByteRanges,
-    io::{outboard::PreOrderOutboard, round_up_to_chunks, sync::encode_ranges_validated},
+    BaoTree, BlockSize, ByteRanges, ChunkRanges,
+    io::{outboard::PreOrderOutboard, round_up_to_chunks, sync::valid_ranges},
 };
 use iroh_blobs::{
     Hash,
@@ -18,7 +18,11 @@ use staya_transfer::{
     bao::{MAX_BAO_PROOF_BYTES, verify_bao_range},
     recovery::{BaoStorageProfile, StoreIdentity},
 };
-use std::{fs, path::Path};
+use std::{
+    fs,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 
 const BLOCK: BlockSize = BlockSize::from_chunk_log(4);
 
@@ -89,6 +93,17 @@ pub fn audit_clean_closed_fixture(
     let outboard =
         fs::File::open(outboard_path).map_err(|e| format!("missing private Bao outboard: {e}"))?;
 
+    // This file is intentionally sparse: G2 partial outboards contain only
+    // paths needed by persisted ranges, not a complete 8 MiB proof tree.
+    // encode_ranges_validated assumes all requested tree nodes are present and
+    // can return UnexpectedEof on a legitimate sparse store. Instead walk
+    // independently authenticated paths against the *trusted* full root.
+    // Never derive trusted ranges from FsStore's disk bitfield alone.
+    let _request =
+        TransferRequest::new(expected.manifest, range.clone()).map_err(|e| format!("{e:?}"))?;
+    if range.len() > staya_transfer::planner::MAX_PLANNED_RANGE_BYTES {
+        return Err("physical audit request exceeds range limit".to_owned());
+    }
     let tree = BaoTree::new(expected.manifest.size, BLOCK);
     let proof = PreOrderOutboard {
         root: blake3::Hash::from_bytes(expected.manifest.id.0),
@@ -96,14 +111,21 @@ pub fn audit_clean_closed_fixture(
         data: &outboard,
     };
     let requested = round_up_to_chunks(&ByteRanges::from(range.start()..range.end()));
-    let mut encoded = Vec::new();
-    encode_ranges_validated(&data, proof, &requested, &mut encoded)
-        .map_err(|e| format!("stored bytes/outboard do not validate: {e}"))?;
-    if encoded.len() > MAX_BAO_PROOF_BYTES {
-        return Err("physical readback proof exceeds bounded range".to_owned());
+    let mut authenticated = ChunkRanges::empty();
+    for result in valid_ranges(proof, &data, &requested) {
+        let span = result.map_err(|e| format!("stored partial Bao validation failed: {e}"))?;
+        authenticated |= ChunkRanges::from(span);
     }
-    let request =
-        TransferRequest::new(expected.manifest, range).map_err(|e| format!("{e:?}"))?;
-    let verified = verify_bao_range(&request, &encoded).map_err(|e| format!("{e:?}"))?;
-    Ok(verified.into_bytes())
+    if !requested.is_subset(&authenticated) {
+        return Err("physical data/outboard did not authenticate requested chunks".to_owned());
+    }
+    let mut data = data;
+    let size = usize::try_from(range.len())
+        .map_err(|_| "invalid audited range byte length")?;
+    let mut verified = vec![0u8; size];
+    data.seek(SeekFrom::Start(range.start()))
+        .map_err(|e| format!("seek verified private data: {e}"))?;
+    data.read_exact(&mut verified)
+        .map_err(|e| format!("read verified private data: {e}"))?;
+    Ok(verified)
 }
