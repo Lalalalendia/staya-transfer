@@ -27,15 +27,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      # G2-04a one-time lockfile bootstrap: capture actual Cargo resolution
-      # from both runners and commit identical lock before accepting this PR.
-      - name: Generate inspectable checkpoint Cargo.lock
+      - name: Enforce committed cross-platform Cargo.lock
         shell: bash
-        run: |
-          cargo generate-lockfile --manifest-path custody/Cargo.toml
-          echo STY_G2_04A_LOCK_BEGIN
-          cat custody/Cargo.lock
-          echo STY_G2_04A_LOCK_END
+        run: cargo metadata --manifest-path custody/Cargo.toml --locked --format-version 1 > /dev/null
       - name: Format gate
         run: cargo fmt --manifest-path custody/Cargo.toml --all -- --check
       - name: OS-process ownership, hardlink and kill regression tests
