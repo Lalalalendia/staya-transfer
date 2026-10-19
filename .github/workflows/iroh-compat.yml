@@ -58,6 +58,11 @@ jobs:
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact clean_reopen_authenticated_range_controls_missing_inventory --nocapture
+      - name: STY-G2-06b second direct QUIC GET omits physically validated ranges
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+          STY_G2_06B_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/resume
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_network_get -- --exact real_second_quic_get_stages_only_unverified_bytes --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
@@ -109,4 +114,9 @@ jobs:
           cmp wire-output/wire-release/first.bin wire-output/wire-fork/first.bin
           cmp wire-output/wire-release/second.bin wire-output/wire-fork/second.bin
           cmp wire-output/wire-release/manifest.txt wire-output/wire-fork/manifest.txt
+          cmp wire-output/wire-release/resume/inventory.txt wire-output/wire-fork/resume/inventory.txt
+          cmp wire-output/wire-release/resume/first.wire wire-output/wire-fork/resume/first.wire
+          cmp wire-output/wire-release/resume/missing-0.wire wire-output/wire-fork/resume/missing-0.wire
+          cmp wire-output/wire-release/resume/missing-1.wire wire-output/wire-fork/resume/missing-1.wire
+          echo STY_G2_06B_RELEASE_FORK_ACTUAL_RESUME_WIRE_IDENTICAL=true
           echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true

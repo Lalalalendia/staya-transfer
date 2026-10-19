@@ -301,3 +301,210 @@ async fn direct_quic_get_bao_peer_policy_reconnect() {
         );
     }).await.expect("bounded STY-G1e QUIC interop timeout");
 }
+
+
+#[path = "fsstore_partial_adapter.rs"]
+mod partial_adapter;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_second_quic_get_stages_only_unverified_bytes() {
+    use partial_adapter::{
+        audit_clean_closed_fixture, stage_verified_fixture, stage_with_inflight_budget,
+    };
+    use staya_custody_lab::{
+        StoreLease,
+        admission::{Limits, SharedAdmission},
+    };
+    use staya_transfer::{
+        TransferBudget,
+        planner::{MissingRanges, VerifiedCheckpoint},
+        recovery::{BaoStorageProfile, StoreIdentity},
+    };
+    use std::sync::atomic::AtomicBool;
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        const START: u64 = 32_768;
+        const END: u64 = 196_608;
+        let root = std::env::temp_dir().join(format!(
+            "staya-g2-06b-{}-{}",
+            std::process::id(),
+            std::env::var("STY_INTEROP_VARIANT").unwrap_or_else(|_| "ci".to_owned()),
+        ));
+        assert!(!root.exists(), "fresh private fixture only");
+        let provider_dir = root.join("provider");
+        let receiver_dir = root.join("receiver");
+        fs::create_dir_all(&provider_dir).unwrap();
+        fs::create_dir_all(&receiver_dir).unwrap();
+
+        let data = deterministic_bytes();
+        let trusted_hash = Hash::new(&data);
+        let manifest = Manifest {
+            id: ContentId(*trusted_hash.as_bytes()),
+            size: data.len() as u64,
+        };
+        let identity = StoreIdentity {
+            manifest,
+            profile: BaoStorageProfile::IrohBlobs0103PreOrder16KiB,
+        };
+
+        // Real pinned release/fork provider and an explicit locally permitted
+        // QUIC peer, not a peer-provided bitmap or untrusted object identity.
+        let source = FsStore::load(&provider_dir).await.unwrap();
+        let provider_tag = source.add_slice(&data).await.unwrap();
+        assert_eq!(provider_tag.hash, trusted_hash);
+        let client_key = SecretKey::generate();
+        let (events, policy_worker, _refused) =
+            deny_by_default(client_key.public(), trusted_hash);
+        let server_endpoint = local_endpoint(SecretKey::generate()).await;
+        let router = Router::builder(server_endpoint)
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&source, Some(events)))
+            .spawn();
+        let client = local_endpoint(client_key).await;
+        let server_addr = router.endpoint().addr();
+        let first_conn = client.connect(server_addr.clone(), iroh_blobs::ALPN)
+            .await
+            .expect("authorized first direct QUIC connection");
+
+        // Stage ONE interior aligned range to the real receiver FsStore.
+        // The stage permit is bounded and cannot establish durable authority.
+        let owner = StoreLease::acquire(&receiver_dir).unwrap();
+        let partial = FsStore::load(&receiver_dir).await.unwrap();
+        let initial = ByteRange::new(START, END, manifest.size).unwrap();
+        let first_wire = tokio::time::timeout(
+            STEP_TIMEOUT,
+            bounded_wire_get(&first_conn, trusted_hash, START..END),
+        )
+        .await
+        .expect("first GET deadline")
+        .expect("real first QUIC wire bytes");
+        let ledger = SharedAdmission::new(Limits {
+            max_partial_objects: 1,
+            max_reserved_bytes: 2 * 1024 * 1024,
+            max_open_handles: 4,
+            max_retries_per_object: 0,
+        })
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let (_accepted, permit) = stage_with_inflight_budget(
+            &owner, &ledger, &partial, identity, initial.clone(), &first_wire, &cancelled,
+        )
+        .await
+        .expect("bounded import of first authenticated wire range");
+        drop(permit);
+        assert_eq!(ledger.usage().unwrap(), (0, 0, 0));
+        first_conn.close(0u8.into(), b"first GET finished");
+        drop(first_conn);
+        partial.shutdown().await.expect("quiesce first receiver actor");
+        drop(partial);
+
+        // A clean restart is NOT an unexpected process termination. Physical
+        // data/outboard Bao validation must match freshly verified first-wire
+        // bytes before they are placed into the temporary range planner.
+        let persisted = audit_clean_closed_fixture(&receiver_dir, identity, initial.clone())
+            .expect("root-anchored physical sparse Bao readback");
+        let checked = TransferRequest::new(manifest, initial).unwrap();
+        let verified = verify_bao_range(&checked, &first_wire[8..]).unwrap();
+        assert_eq!(verified.bytes(), persisted.as_slice());
+        let mut checkpoint = VerifiedCheckpoint::empty(manifest);
+        checkpoint.record_bao(verified).unwrap();
+        let budget = TransferBudget {
+            max_inflight_bytes: 1024 * 1024,
+            max_sources: 1,
+            max_retries: 0,
+        };
+        let planned: Vec<_> = MissingRanges::from_checkpoint(manifest, &checkpoint, budget)
+            .unwrap()
+            .map(|range| (range.start(), range.end()))
+            .collect();
+        assert_eq!(planned, vec![(0, START), (END, manifest.size)]);
+        assert_eq!(
+            planned.iter().map(|(start, end)| end - start).sum::<u64>(),
+            manifest.size - (END - START)
+        );
+
+        // Reconnect over a second actual QUIC connection. Every GET and
+        // receiver import is issued strictly from the independently checked
+        // missing-range plan, never from FsStore's persisted bitfield alone.
+        let second_conn = client.connect(server_addr, iroh_blobs::ALPN)
+            .await
+            .expect("authorized second QUIC connection");
+        let resumed = FsStore::load(&receiver_dir).await.expect("fresh FsStore actor");
+        let mut captured = Vec::new();
+        for &(start, end) in &planned {
+            assert!(end <= START || start >= END, "re-GET of authenticated bytes");
+            let wire = tokio::time::timeout(
+                STEP_TIMEOUT,
+                bounded_wire_get(&second_conn, trusted_hash, start..end),
+            )
+            .await
+            .expect("second-phase GET deadline")
+            .expect("second-phase real QUIC response");
+            let wanted = ByteRange::new(start, end, manifest.size).unwrap();
+            let request = TransferRequest::new(manifest, wanted.clone()).unwrap();
+            let checked_wire = verify_bao_range(&request, &wire[8..]).unwrap();
+            assert_eq!(checked_wire.bytes(), &data[start as usize..end as usize]);
+            stage_verified_fixture(&resumed, identity, wanted, &wire)
+                .await
+                .expect("import missing authenticated bytes into reopened FsStore");
+            captured.push(wire);
+        }
+        assert_eq!(captured.len(), 2);
+        let reassembled = resumed
+            .blobs()
+            .get_bytes(trusted_hash)
+            .await
+            .expect("FsStore must expose the fully reconstructed object");
+        assert_eq!(reassembled.len(), data.len());
+        assert_eq!(Hash::new(reassembled.as_ref()), trusted_hash);
+        assert_eq!(reassembled.as_ref(), data.as_slice());
+
+        // Optional CI evidence consists of exact raw GET bytes and a stable,
+        // human-readable list of requested ranges and final BLAKE3 root.
+        if let Some(dest) = std::env::var_os("STY_G2_06B_OUTPUT_DIR") {
+            fs::create_dir_all(&dest).unwrap();
+            let dest = std::path::PathBuf::from(dest);
+            fs::write(dest.join("first.wire"), &first_wire).unwrap();
+            fs::write(dest.join("missing-0.wire"), &captured[0]).unwrap();
+            fs::write(dest.join("missing-1.wire"), &captured[1]).unwrap();
+            fs::write(
+                dest.join("inventory.txt"),
+                format!(
+                    "trusted_blake3={}\nsize={}\nretained={START}-{END}\nmissing={}-{}\nmissing={}-{}\ncompleted_blake3={}\n",
+                    trusted_hash.to_hex(),
+                    manifest.size,
+                    planned[0].0,
+                    planned[0].1,
+                    planned[1].0,
+                    planned[1].1,
+                    Hash::new(reassembled.as_ref()).to_hex(),
+                ),
+            )
+            .unwrap();
+        }
+
+        second_conn.close(0u8.into(), b"second GET complete");
+        resumed.shutdown().await.expect("quiesce completed receiver actor");
+        drop(resumed);
+
+        // The same completed object must also survive a second CLEAN reload.
+        let reopened = FsStore::load(&receiver_dir).await.unwrap();
+        let bytes = reopened.blobs().get_bytes(trusted_hash).await.unwrap();
+        assert_eq!(Hash::new(bytes.as_ref()), trusted_hash);
+        assert_eq!(bytes.as_ref(), data.as_slice());
+        reopened.shutdown().await.unwrap();
+        drop(reopened);
+        drop(owner);
+
+        router.shutdown().await.expect("stop real provider");
+        client.close().await;
+        policy_worker.abort();
+        drop(provider_tag);
+        drop(source);
+        fs::remove_dir_all(&root).expect("remove private test data only");
+        println!(
+            "STY_G2_06B real_quic_gets=3 second_connection=true first_retained={START}-{END} second_missing_ranges=2 full_blake3=true clean_reopen=true process_kill=false relay=false file_gate=false"
+        );
+    })
+    .await
+    .expect("bounded G2-06b network partial-resume fixture");
+}
