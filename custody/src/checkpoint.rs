@@ -225,10 +225,7 @@ pub fn cleanup_pending_records(owner: &StoreLease) -> io::Result<OrphanCleanup> 
     for (path, expected_length) in candidates {
         owner.validate_fence()?;
         let actual = fs::symlink_metadata(&path)?;
-        if !actual.is_file()
-            || actual.file_type().is_symlink()
-            || actual.len() != expected_length
-        {
+        if !actual.is_file() || actual.file_type().is_symlink() || actual.len() != expected_length {
             return Err(invalid("pending checkpoint changed during cleanup"));
         }
         #[cfg(windows)]
