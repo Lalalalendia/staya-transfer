@@ -11,6 +11,8 @@ pub mod lab;
 
 pub mod planner;
 
+pub mod recovery;
+
 #[cfg(feature = "bao")]
 pub mod bao;
 
