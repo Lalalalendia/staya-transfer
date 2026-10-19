@@ -224,12 +224,8 @@ mod tests {
     fn near_u64_max_remains_lazy_without_overflow() {
         let mut already = VerifiedCheckpoint::empty(manifest(u64::MAX));
         already.verified.add_verified(ByteRange::new(0, u64::MAX - 10, u64::MAX).unwrap());
-        let mut plan = MissingRanges::from_checkpoint(
-            manifest(u64::MAX),
-            &already,
-            budget(1024),
-        )
-        .unwrap();
+        let mut plan =
+            MissingRanges::from_checkpoint(manifest(u64::MAX), &already, budget(1024)).unwrap();
         assert_eq!(plan.next().map(pair), Some((u64::MAX - 10, u64::MAX)));
         assert!(plan.next().is_none());
     }
