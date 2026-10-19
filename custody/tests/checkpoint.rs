@@ -17,7 +17,10 @@ const ROOT: [u8; 32] = [0x42; 32];
 const SIZE: u64 = 1_048_593;
 
 fn root(label: &str) -> PathBuf {
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let path = std::env::temp_dir().join(format!(
         "staya-g2-04a-{}-{label}-{nonce}",
         std::process::id()
