@@ -258,7 +258,8 @@ mod tests {
 
         let recorded = checkpoint.staged_ranges().next().unwrap();
         assert_eq!(recorded.bytes(), &data[5000..14000]);
-        assert_eq!(checkpoint.verified_ranges(), &[5000..14000]);
+        assert_eq!(checkpoint.verified_ranges().len(), 1);
+        assert_eq!(checkpoint.verified_ranges()[0], 5000..14000);
 
         let plan = MissingRanges::from_checkpoint(
             request.manifest,
@@ -312,7 +313,8 @@ mod tests {
             Err(TransferError::InvalidBudget)
         ));
         assert_eq!(checkpoint.staged_ranges().count(), 8);
-        assert_eq!(checkpoint.verified_ranges(), &[0..MIB as u64]);
+        assert_eq!(checkpoint.verified_ranges().len(), 1);
+        assert_eq!(checkpoint.verified_ranges()[0], 0..MIB as u64);
     }
 
     #[test]
