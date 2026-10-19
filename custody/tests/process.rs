@@ -199,6 +199,31 @@ fn repeated_drop_and_reacquire_has_no_stale_lock_descriptor() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// An explicit LOCK_UN experiment; does not replace or silence the separate
+/// Drop-only 128-cycle stress test. Both must be reported independently.
+#[test]
+fn explicit_unlock_reacquire_128_with_competing_process() {
+    let root = private_root("explicit-unlock-128");
+    for cycle in 0..128 {
+        let lease = StoreLease::acquire(&root).unwrap_or_else(|err| {
+            panic!(
+                "explicit-release cycle {cycle} failed: {err:?}; {}",
+                debug_lock_ownership(&root)
+            )
+        });
+        lease.validate_fence().expect("lease still valid");
+        if cycle % 32 == 0 {
+            assert_eq!(stdout_text(&worker("probe", &root)), "BUSY");
+        }
+        lease.release().expect("explicit OS unlock with live owner");
+        if cycle % 32 == 0 {
+            assert_eq!(stdout_text(&worker("probe", &root)), "ACQUIRED");
+        }
+    }
+    println!("STY_G2_05D_EXPLICIT_UNLOCK cycles=128 cross_process_checks=8 success=true");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn symbolic_link_alias_is_denied() {
