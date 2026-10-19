@@ -28,6 +28,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Enforce committed cross-platform Cargo.lock
+        shell: bash
         run: cargo metadata --manifest-path custody/Cargo.toml --locked --format-version 1 > /dev/null
       - name: Format gate
         run: cargo fmt --manifest-path custody/Cargo.toml --all -- --check
