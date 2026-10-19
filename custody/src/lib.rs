@@ -102,20 +102,26 @@ impl StoreLease {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&lock_path)?;
+            .open(&lock_path)
+            .map_err(|err| io::Error::new(err.kind(), format!("lockfile open: {err}")))?;
         // Compare the actual newly opened file against its directory entry.
         // Do NOT retain a duplicate of the locking file description for the
         // entire lease: File::try_lock on Unix is flock-based, and a retained
         // try_clone() can extend lock lifetime until the duplicate is closed.
         // A fresh path-based Handle is an independently opened descriptor used
         // ONLY for identity checks; it is never the locking descriptor.
-        let opened_identity = Handle::from_file(file.try_clone()?)?;
-        let lock_identity = Handle::from_path(&lock_path)?;
+        let opened_identity = Handle::from_file(file.try_clone()?)
+            .map_err(|err| io::Error::new(err.kind(), format!("open-file identity: {err}")))?;
+        let lock_identity = Handle::from_path(&lock_path)
+            .map_err(|err| io::Error::new(err.kind(), format!("path identity: {err}")))?;
         if opened_identity != lock_identity {
             return Err(invalid("custody lockfile changed during acquisition"));
         }
         drop(opened_identity);
-        file.try_lock().map_err(io::Error::from)?;
+        file.try_lock().map_err(|reason| {
+            let err = io::Error::from(reason);
+            io::Error::new(err.kind(), format!("exclusive try_lock: {err}"))
+        })?;
         let guard = Self {
             canonical_root,
             root_identity,
@@ -123,7 +129,9 @@ impl StoreLease {
             lock_identity,
             _held_exclusive_lock: file,
         };
-        guard.validate_fence()?;
+        guard
+            .validate_fence()
+            .map_err(|err| io::Error::new(err.kind(), format!("initial fence: {err}")))?;
         Ok(guard)
     }
 
