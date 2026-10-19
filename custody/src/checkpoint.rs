@@ -8,7 +8,7 @@
 
 use crate::StoreLease;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -241,7 +241,7 @@ pub fn publish_candidate(owner: &StoreLease, claim: CheckpointClaim) -> io::Resu
     #[cfg(unix)]
     {
         // Linux/macOS same-volume directory barrier. Fail closed if unsupported.
-        File::open(owner.canonical_root())?.sync_all()?;
+        fs::File::open(owner.canonical_root())?.sync_all()?;
         owner.validate_fence()?;
         Ok(MetadataBarrier::FileAndDirectorySynced)
     }
