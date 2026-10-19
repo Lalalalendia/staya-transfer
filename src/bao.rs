@@ -11,18 +11,12 @@
 use std::io::Cursor;
 
 use bao_tree::{
-    blake3,
-    io::{
-        round_up_to_chunks,
-        sync::DecodeResponseIter,
-        BaoContentItem,
-    },
-    BaoTree, BlockSize, ByteRanges,
+    BaoTree, BlockSize, ByteRanges, blake3,
+    io::{BaoContentItem, round_up_to_chunks, sync::DecodeResponseIter},
 };
 
 use crate::{
-    planner::MAX_PLANNED_RANGE_BYTES,
-    ByteRange, Manifest, TransferError, TransferRequest,
+    ByteRange, Manifest, TransferError, TransferRequest, planner::MAX_PLANNED_RANGE_BYTES,
 };
 
 /// Same 16 KiB chunk-group size used by iroh-blobs.
@@ -84,9 +78,7 @@ pub fn verify_bao_range(
     if start >= end || end > size {
         return Err(TransferError::InvalidRange);
     }
-    if request.range.len() > MAX_PLANNED_RANGE_BYTES
-        || encoded.len() > MAX_BAO_PROOF_BYTES
-    {
+    if request.range.len() > MAX_PLANNED_RANGE_BYTES || encoded.len() > MAX_BAO_PROOF_BYTES {
         return Err(TransferError::InvalidBudget);
     }
 
@@ -146,9 +138,9 @@ pub fn verify_bao_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ContentId, TransferRequest};
     use bao_tree::io::outboard::PreOrderMemOutboard;
     use bao_tree::io::sync::encode_ranges_validated;
-    use crate::{ContentId, TransferRequest};
 
     fn fixture(data: &[u8], range: std::ops::Range<u64>) -> (TransferRequest, Vec<u8>) {
         let outboard = PreOrderMemOutboard::create(data, IROH_BLOCK_SIZE);
