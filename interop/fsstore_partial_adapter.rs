@@ -8,11 +8,7 @@ use bao_tree::{
     BaoTree, BlockSize, ByteRanges, ChunkRanges,
     io::{outboard::PreOrderOutboard, round_up_to_chunks, sync::valid_ranges},
 };
-use iroh_blobs::{
-    Hash,
-    protocol::ChunkRangesExt,
-    store::fs::FsStore,
-};
+use iroh_blobs::{Hash, protocol::ChunkRangesExt, store::fs::FsStore};
 use staya_transfer::{
     ByteRange, TransferRequest,
     bao::{MAX_BAO_PROOF_BYTES, verify_bao_range},
@@ -56,9 +52,7 @@ pub async fn stage_verified_fixture(
     if wire.len() < 8 || wire.len() > MAX_BAO_PROOF_BYTES + 8 {
         return Err("wire response length out of bounds".to_owned());
     }
-    let declared = u64::from_le_bytes(
-        wire[..8].try_into().map_err(|_| "missing length prefix")?,
-    );
+    let declared = u64::from_le_bytes(wire[..8].try_into().map_err(|_| "missing length prefix")?);
     if declared != expected.manifest.size {
         return Err("wire object length differs from trusted manifest".to_owned());
     }
@@ -129,8 +123,7 @@ pub fn audit_clean_closed_fixture(
         return Err("physical data/outboard did not authenticate requested chunks".to_owned());
     }
     let mut data = data;
-    let size = usize::try_from(range.len())
-        .map_err(|_| "invalid audited range byte length")?;
+    let size = usize::try_from(range.len()).map_err(|_| "invalid audited range byte length")?;
     let mut verified = vec![0u8; size];
     data.seek(SeekFrom::Start(range.start()))
         .map_err(|e| format!("seek verified private data: {e}"))?;
