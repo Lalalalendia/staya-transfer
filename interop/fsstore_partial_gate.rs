@@ -439,13 +439,34 @@ async fn clean_reopen_authenticated_range_controls_missing_inventory() {
         // function call using in-memory FsStore handles. The child acquires
         // exclusive custody and audits the physical .data/.obao4 files.
         drop(lease);
-        let cold = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut cold_child = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("clean_reopen_authenticated_range_controls_missing_inventory")
             .arg("--nocapture")
             .env("STY_G2_06A_COLD_AUDIT_ROOT", &dir)
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("start independent cold-reopen verifier");
+        let started = std::time::Instant::now();
+        loop {
+            if cold_child
+                .try_wait()
+                .expect("cold auditor process status")
+                .is_some()
+            {
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(30) {
+                let _ = cold_child.kill();
+                let _ = cold_child.wait();
+                panic!("cold Bao auditor exceeded bounded process deadline");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let cold = cold_child
+            .wait_with_output()
+            .expect("capture independent cold Bao auditor");
         let cold_stdout = String::from_utf8_lossy(&cold.stdout);
         assert!(
             cold.status.success() && cold_stdout.contains("STY_G2_06A_COLD_AUDIT"),
