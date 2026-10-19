@@ -137,6 +137,33 @@ fn alias_of_same_root_does_not_acquire_second_writer() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn repeated_drop_and_reacquire_has_no_stale_lock_descriptor() {
+    let root = private_root("reacquire-128");
+    for cycle in 0..128 {
+        let lease = StoreLease::acquire(&root)
+            .unwrap_or_else(|err| panic!("reacquire cycle {cycle} failed: {err:?}"));
+        lease.validate_fence().expect("owned physical identity");
+        if cycle % 32 == 0 {
+            assert_eq!(
+                stdout_text(&worker("probe", &root)),
+                "BUSY",
+                "cycle {cycle}: another OS process cannot enter while held"
+            );
+        }
+        drop(lease);
+        if cycle % 32 == 0 {
+            assert_eq!(
+                stdout_text(&worker("probe", &root)),
+                "ACQUIRED",
+                "cycle {cycle}: another OS process must enter immediately after release"
+            );
+        }
+    }
+    println!("STY_G2_05C_CUSTODY_STRESS cycles=128 cross_process_checks=8 success=true");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn symbolic_link_alias_is_denied() {
