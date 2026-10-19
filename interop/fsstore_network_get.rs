@@ -2,11 +2,7 @@
 //! Only ephemeral direct loopback QUIC, explicit peer and hash authorization.
 //! This does NOT enable Akula user-file access, relay or crash-safe resume.
 
-use std::{
-    collections::HashSet,
-    fs,
-    time::Duration,
-};
+use std::{fs, time::Duration};
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, endpoint::presets, protocol::Router};
 use iroh_blobs::{
     BlobsProtocol, Hash,
