@@ -3,15 +3,15 @@
 //! platform-specific durability barrier is independently verified.
 //! Cooperative StoreLease, not adversarial FD-relative custody or File Gate.
 
-use crate::{forbid_link, validate_walk, StoreLease};
+use crate::{StoreLease, forbid_link, validate_walk};
 use same_file::Handle;
+#[cfg(unix)]
+use std::io::Write;
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read},
     path::{Path, PathBuf},
 };
-#[cfg(unix)]
-use std::io::Write;
 
 const HEADER: &[u8; 8] = b"STYG2CP1";
 const TRAILER: &[u8; 8] = b"STYEND01";
@@ -34,8 +34,11 @@ pub struct Claim {
 
 impl Claim {
     fn check(self) -> io::Result<()> {
-        if self.generation == 0 || self.size == 0 || self.start >= self.end
-            || self.end > self.size || self.end - self.start > MAX_RANGE
+        if self.generation == 0
+            || self.size == 0
+            || self.start >= self.end
+            || self.end > self.size
+            || self.end - self.start > MAX_RANGE
             || self.start % GROUP != 0
             || (self.end != self.size && self.end % GROUP != 0)
         {
@@ -59,7 +62,8 @@ impl Claim {
     }
 
     fn decode(b: &[u8; RECORD_SIZE]) -> io::Result<Self> {
-        if &b[..8] != HEADER || &b[80..88] != TRAILER
+        if &b[..8] != HEADER
+            || &b[80..88] != TRAILER
             || u32::from_le_bytes(b[8..12].try_into().unwrap()) != 1
             || u32::from_le_bytes(b[12..16].try_into().unwrap()) != 1
         {
@@ -188,7 +192,9 @@ pub fn publish_after_audit(
         lease.validate_fence()?;
         // No replacement or reuse of stale pending files; only new generations.
         let mut staged = OpenOptions::new()
-            .write(true).create_new(true).open(&pending)?;
+            .write(true)
+            .create_new(true)
+            .open(&pending)?;
         staged.write_all(&claim.encode())?;
         staged.flush()?;
         staged.sync_all()?;
@@ -243,12 +249,19 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn fixture() -> (PathBuf, Claim) {
-        let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let t = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let root = std::env::temp_dir().join(format!("staya-g2-04-{}-{t}", std::process::id()));
         fs::create_dir(&root).unwrap();
         fs::create_dir(root.join("data")).unwrap();
         let c = Claim {
-            root: [0x41; 32], size: 131_072, start: 0, end: 32_768, generation: 1,
+            root: [0x41; 32],
+            size: 131_072,
+            start: 0,
+            end: 32_768,
+            generation: 1,
         };
         let lease = StoreLease::acquire(&root).unwrap();
         let (p, _, _) = paths(&lease, c);
@@ -259,9 +272,7 @@ mod tests {
     }
 
     fn fixture_audit(p: &PartialPaths) -> io::Result<()> {
-        if fs::read(&p.data)? != vec![0xC5; 32_768]
-            || fs::metadata(&p.outboard)?.len() != 256
-        {
+        if fs::read(&p.data)? != vec![0xC5; 32_768] || fs::metadata(&p.outboard)?.len() != 256 {
             return Err(invalid("disposable fixture changed"));
         }
         Ok(())
@@ -291,14 +302,23 @@ mod tests {
         let (root, c) = fixture();
         let lease = StoreLease::acquire(&root).unwrap();
         publish_after_audit(&lease, c, fixture_audit).unwrap();
-        assert_eq!(inspect_untrusted(&lease, c).unwrap(), Reopen::NeedsFreshPhysicalBaoAudit(c));
+        assert_eq!(
+            inspect_untrusted(&lease, c).unwrap(),
+            Reopen::NeedsFreshPhysicalBaoAudit(c)
+        );
         drop(lease);
         let second = StoreLease::acquire(&root).unwrap();
-        assert_eq!(inspect_untrusted(&second, c).unwrap(), Reopen::NeedsFreshPhysicalBaoAudit(c));
+        assert_eq!(
+            inspect_untrusted(&second, c).unwrap(),
+            Reopen::NeedsFreshPhysicalBaoAudit(c)
+        );
         let (p, _, marker) = paths(&second, c);
         fs::write(&p.data, vec![0; 32_768]).unwrap();
         assert!(fixture_audit(&p).is_err());
-        assert!(matches!(inspect_untrusted(&second, c).unwrap(), Reopen::NeedsFreshPhysicalBaoAudit(_)));
+        assert!(matches!(
+            inspect_untrusted(&second, c).unwrap(),
+            Reopen::NeedsFreshPhysicalBaoAudit(_)
+        ));
         let mut mark = OpenOptions::new().write(true).open(marker).unwrap();
         mark.write_all(b"X").unwrap();
         mark.sync_all().unwrap();
@@ -332,7 +352,9 @@ mod tests {
         let (root, c) = fixture();
         let lease = StoreLease::acquire(&root).unwrap();
         assert_eq!(
-            publish_after_audit(&lease, c, fixture_audit).unwrap_err().kind(),
+            publish_after_audit(&lease, c, fixture_audit)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::Unsupported
         );
         assert!(inspect_untrusted(&lease, c).is_err());
