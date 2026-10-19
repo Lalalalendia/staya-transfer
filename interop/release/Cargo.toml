@@ -1,0 +1,20 @@
+[package]
+name = "staya-iroh-release-compat"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[[test]]
+name = "fsstore_compat"
+path = "../fsstore_compat.rs"
+
+[dependencies]
+staya-transfer = { path = "../..", features = ["bao"] }
+bao-tree = { version = "=0.16.1", default-features = false, features = ["fs"] }
+blake3 = "=1.8.5"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+iroh-blobs = { version = "=0.103.1", default-features = false, features = ["fs-store"] }

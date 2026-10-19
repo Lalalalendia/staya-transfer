@@ -1,0 +1,63 @@
+name: Iroh FsStore compatibility
+on:
+  pull_request:
+    paths:
+      - 'interop/**'
+      - '.github/workflows/iroh-compat.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: iroh-compat-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  fsstore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [release, fork]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Enforce committed isolated Cargo.lock
+        run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1 > /dev/null
+      - name: Real FsStore to Staya Bao verification
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+          STY_INTEROP_OUTPUT_DIR: ${{ github.workspace }}/proof-artifact
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_compat -- --exact actual_fsstore_bao_outboard_authenticates_in_staya --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proof-${{ matrix.variant }}
+          path: |
+            proof-artifact/proof.bin
+            proof-artifact/manifest.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve actual Cargo dependency resolution
+        uses: actions/upload-artifact@v4
+        with:
+          name: lock-${{ matrix.variant }}
+          path: interop/${{ matrix.variant }}/Cargo.lock
+          if-no-files-found: error
+          retention-days: 7
+  byte-for-byte:
+    needs: fsstore
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: proof-*
+          path: proof-output
+      - name: Compare fork and release Bao responses
+        run: |
+          cmp proof-output/proof-release/proof.bin proof-output/proof-fork/proof.bin
+          cmp proof-output/proof-release/manifest.txt proof-output/proof-fork/manifest.txt
+          echo STY_G1D_RELEASE_FORK_BAO_IDENTICAL=true
