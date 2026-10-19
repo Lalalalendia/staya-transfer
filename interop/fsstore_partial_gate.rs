@@ -9,7 +9,6 @@ mod partial_adapter;
 #[path = "fsstore_shutdown_supervisor.rs"]
 mod shutdown_supervisor;
 
-use shutdown_supervisor::ActiveFsStore;
 use bao_tree::{
     BlockSize, ByteRanges,
     io::{outboard::PreOrderMemOutboard, round_up_to_chunks, sync::encode_ranges_validated},
@@ -18,6 +17,7 @@ use iroh_blobs::{Hash, api::blobs::BlobStatus, store::fs::FsStore};
 use partial_adapter::{
     audit_clean_closed_fixture, stage_verified_fixture, stage_with_inflight_budget,
 };
+use shutdown_supervisor::ActiveFsStore;
 use staya_custody_lab::{
     StoreLease,
     admission::{Limits, Reservation, SharedAdmission},
