@@ -11,6 +11,9 @@ pub mod lab;
 
 pub mod planner;
 
+#[cfg(feature = "bao")]
+pub mod bao;
+
 /// A BLAKE3 content root, distinct from peer and Akula revision identities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ContentId(pub [u8; 32]);

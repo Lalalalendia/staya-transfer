@@ -10,8 +10,15 @@
 use crate::{ByteRange, Manifest, TransferBudget, TransferError, VerifiedRanges};
 use std::ops::Range;
 
+#[cfg(feature = "bao")]
+use crate::bao::VerifiedBaoRange;
+
 /// Hard upper bound for an individual planned read.
 pub const MAX_PLANNED_RANGE_BYTES: u64 = 1024 * 1024;
+
+/// Maximum authenticated payload staged by the in-memory checkpoint.
+#[cfg(feature = "bao")]
+pub const MAX_BUFFERED_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A checkpoint tied to one exact object identity.
 /// External callers can only create an EMPTY checkpoint: verified ranges will
@@ -21,6 +28,10 @@ pub const MAX_PLANNED_RANGE_BYTES: u64 = 1024 * 1024;
 pub struct VerifiedCheckpoint {
     manifest: Manifest,
     verified: VerifiedRanges,
+    #[cfg(feature = "bao")]
+    held: Vec<VerifiedBaoRange>,
+    #[cfg(feature = "bao")]
+    buffered_bytes: u64,
 }
 
 impl VerifiedCheckpoint {
@@ -28,6 +39,10 @@ impl VerifiedCheckpoint {
         Self {
             manifest,
             verified: VerifiedRanges::default(),
+            #[cfg(feature = "bao")]
+            held: Vec::new(),
+            #[cfg(feature = "bao")]
+            buffered_bytes: 0,
         }
     }
 
@@ -37,6 +52,36 @@ impl VerifiedCheckpoint {
 
     pub fn verified_ranges(&self) -> &[Range<u64>] {
         self.verified.ranges()
+    }
+
+    /// Accept only a successfully root-verified Bao proof and retain its
+    /// authenticated bytes in this bounded in-memory checkpoint. Checkpoints
+    /// are deliberately NOT durable and cannot be reconstructed from a peer.
+    #[cfg(feature = "bao")]
+    pub fn record_bao(&mut self, verified: VerifiedBaoRange) -> Result<(), TransferError> {
+        if verified.manifest() != self.manifest
+            || verified.bytes().len() as u64 != verified.range().len()
+        {
+            return Err(TransferError::InvalidRange);
+        }
+        let total = self
+            .buffered_bytes
+            .checked_add(verified.bytes().len() as u64)
+            .ok_or(TransferError::InvalidBudget)?;
+        if total > MAX_BUFFERED_CHECKPOINT_BYTES {
+            return Err(TransferError::InvalidBudget);
+        }
+        self.verified.add_verified(verified.range().clone());
+        self.held.push(verified);
+        self.buffered_bytes = total;
+        Ok(())
+    }
+
+    /// Iterates trusted authenticated bytes still retained in memory; these
+    /// bytes are not yet crash-safe, published or authorized for a Vault.
+    #[cfg(feature = "bao")]
+    pub fn staged_ranges(&self) -> impl Iterator<Item = &VerifiedBaoRange> {
+        self.held.iter()
     }
 }
 

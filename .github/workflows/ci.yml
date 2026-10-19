@@ -1,27 +1,31 @@
 name: Rust contracts
 on:
-  # Feature pushes are covered by the PR event, avoiding duplicate runs.
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
-# Only the newest commit on a PR needs a runner. Branch-independent gates
-# remain separately verifiable; main pushes have their own group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}
+  group: rust-contracts-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: Enforce committed dependency resolution
-        run: cargo metadata --locked --no-deps --format-version 1 > /dev/null
-      - run: cargo fmt --all -- --check
-      - run: cargo test --locked --all-targets
-      - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Verify committed Cargo.lock
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      - name: Test base contracts without Bao
+        run: cargo test --locked --all-targets --no-default-features
+      - name: Test Bao proof adapter
+        run: cargo test --locked --all-targets --all-features
+      - name: Clippy all features
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+        if: always()
