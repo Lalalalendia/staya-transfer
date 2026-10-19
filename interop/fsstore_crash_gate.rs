@@ -87,7 +87,9 @@ async fn child_writer(root: &Path, mode: &str) {
     let owner = StoreLease::acquire(root).expect("child is the sole OS writer");
     let data = make_data();
     let expected = identity(&data);
-    let store = FsStore::load(root).await.expect("real pinned FsStore in child");
+    let store = FsStore::load(root)
+        .await
+        .expect("real pinned FsStore in child");
     let wire = proof_wire(&data);
     stage_verified_fixture(&store, expected, range(), &wire)
         .await
@@ -99,18 +101,23 @@ async fn child_writer(root: &Path, mode: &str) {
         store.shutdown().await.expect("quiescent FsStore shutdown");
         drop(store);
         let result = publish_after_quiescent_audit(&owner, claim(expected), |_| {
-            let verified = audit_clean_closed_fixture(root, expected, range())
-                .map_err(io::Error::other)?;
+            let verified =
+                audit_clean_closed_fixture(root, expected, range()).map_err(io::Error::other)?;
             if verified != data[START as usize..END as usize] {
                 return Err(io::Error::other("quiescent Bao physical readback mismatch"));
             }
             Ok(())
         });
         #[cfg(unix)]
-        assert!(result.is_ok(), "Unix sync and Bao audit must pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "Unix sync and Bao audit must pass: {result:?}"
+        );
         #[cfg(windows)]
         assert_eq!(
-            result.expect_err("Windows must not publish a durable claim").kind(),
+            result
+                .expect_err("Windows must not publish a durable claim")
+                .kind(),
             io::ErrorKind::Unsupported
         );
     } else {
@@ -123,7 +130,9 @@ async fn child_writer(root: &Path, mode: &str) {
     // Only a test-control signal: writing this marker is NOT an FsStore
     // durability barrier. Parent kills this process after seeing it.
     let mut ready = fs::File::create(root.join(READY_FILE)).expect("create ready marker");
-    ready.write_all(mode.as_bytes()).expect("write ready marker");
+    ready
+        .write_all(mode.as_bytes())
+        .expect("write ready marker");
     ready.sync_all().expect("publish ready marker to parent");
     println!("STY_G2_05A_CHILD_READY={mode}");
     tokio::time::sleep(Duration::from_secs(120)).await;
@@ -186,7 +195,10 @@ async fn run_and_reopen(mode: &str) {
 
     child.0.kill().expect("forcefully terminate process");
     let exit = child.0.wait().expect("reap killed worker");
-    assert!(!exit.success(), "test worker exited gracefully, not by kill");
+    assert!(
+        !exit.success(),
+        "test worker exited gracefully, not by kill"
+    );
     drop(child);
 
     let owner = StoreLease::acquire(&root).expect("independent process reclaims OS lock");
@@ -238,7 +250,9 @@ async fn run_and_reopen(mode: &str) {
 
     // Reopen the real pinned store in the second process, but never promote
     // its bitmap/status into a VerifiedCheckpoint without Bao readback.
-    let reopened = FsStore::load(&root).await.expect("FsStore reopens after process death");
+    let reopened = FsStore::load(&root)
+        .await
+        .expect("FsStore reopens after process death");
     let backend_status = reopened
         .blobs()
         .status(Hash::from_bytes(expected.manifest.id.0))
