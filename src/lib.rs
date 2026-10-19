@@ -1,22 +1,26 @@
 #![forbid(unsafe_code)]
-//! Transport-neutral transfer contracts for immutable, content-addressed data.
+//! Transport-neutral contracts for immutable, content-addressed data.
 //!
-//! This crate does not authenticate users, apply Akula revisions, or persist files.
+//! This crate does not authenticate users, apply Akula revisions, or persist
+//! files. The `lab` module is a bounded in-memory integration contract, not
+//! a QUIC, Bao or production sync implementation.
 
 use std::ops::Range;
 
-/// A verified content identity, distinct from peer identity or Akula revision identity.
+pub mod lab;
+
+/// A BLAKE3 content root, distinct from peer and Akula revision identities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ContentId(pub [u8; 32]);
 
-/// Declared content extent. The digest algorithm is part of a future negotiated profile.
+/// Immutable declared full-object identity and length.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Manifest {
     pub id: ContentId,
     pub size: u64,
 }
 
-/// A nonempty half-open byte interval.
+/// A nonempty, half-open byte interval bounded by a declared extent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ByteRange(Range<u64>);
 
@@ -28,13 +32,25 @@ impl ByteRange {
         Ok(Self(start..end))
     }
 
-    pub fn start(&self) -> u64 { self.0.start }
-    pub fn end(&self) -> u64 { self.0.end }
-    pub fn len(&self) -> u64 { self.0.end - self.0.start }
-    pub fn is_empty(&self) -> bool { false }
+    pub fn start(&self) -> u64 {
+        self.0.start
+    }
+
+    pub fn end(&self) -> u64 {
+        self.0.end
+    }
+
+    pub fn len(&self) -> u64 {
+        self.0.end - self.0.start
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
 }
 
-/// Absolute resource limits for one transfer attempt.
+/// Absolute limits for a transfer attempt; production adapters must impose
+/// their own hard resource caps in addition to these caller-provided limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransferBudget {
     pub max_inflight_bytes: u64,
@@ -51,7 +67,7 @@ impl TransferBudget {
     }
 }
 
-/// Idempotent scheduling request. Access policy is checked *before* producing this value.
+/// A range request; authorization MUST happen before this object is produced.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransferRequest {
     pub manifest: Manifest,
@@ -60,7 +76,9 @@ pub struct TransferRequest {
 
 impl TransferRequest {
     pub fn new(manifest: Manifest, range: ByteRange) -> Result<Self, TransferError> {
-        if range.end() > manifest.size { return Err(TransferError::InvalidRange); }
+        if range.end() > manifest.size {
+            return Err(TransferError::InvalidRange);
+        }
         Ok(Self { manifest, range })
     }
 }
@@ -76,14 +94,17 @@ pub enum TransferError {
     TransportUnavailable,
 }
 
-/// An exact range is complete only after an external digest verifier approves it.
-/// This is a scheduling helper, not a substitute for Bao/BLAKE3 verification.
+/// Ranges whose integrity was already proven by the caller's trusted backend.
+/// This data structure does NOT perform Bao verification itself. Do not trust
+/// any ranges received from an untrusted peer just because they appear here.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VerifiedRanges {
     ranges: Vec<Range<u64>>,
 }
 
 impl VerifiedRanges {
+    /// The caller MUST first validate the exact range against a trusted root.
+    /// Used only for bookkeeping; not a proof or permission to apply a file.
     pub fn add_verified(&mut self, verified: ByteRange) {
         self.ranges.push(verified.0);
         self.ranges.sort_by_key(|r| r.start);
@@ -101,10 +122,14 @@ impl VerifiedRanges {
     }
 
     pub fn covers(&self, target: &ByteRange) -> bool {
-        self.ranges.iter().any(|r| r.start <= target.start() && r.end >= target.end())
+        self.ranges
+            .iter()
+            .any(|r| r.start <= target.start() && r.end >= target.end())
     }
 
-    pub fn ranges(&self) -> &[Range<u64>] { &self.ranges }
+    pub fn ranges(&self) -> &[Range<u64>] {
+        &self.ranges
+    }
 }
 
 #[cfg(test)]
@@ -121,9 +146,33 @@ mod tests {
 
     #[test]
     fn validates_budgets() {
-        assert_eq!(TransferBudget { max_inflight_bytes: 0, max_sources: 1, max_retries: 0 }.validate(), Err(TransferError::InvalidBudget));
-        assert_eq!(TransferBudget { max_inflight_bytes: 1, max_sources: 0, max_retries: 1 }.validate(), Err(TransferError::InvalidBudget));
-        assert!(TransferBudget { max_inflight_bytes: 1, max_sources: 1, max_retries: 0 }.validate().is_ok());
+        assert_eq!(
+            TransferBudget {
+                max_inflight_bytes: 0,
+                max_sources: 1,
+                max_retries: 0
+            }
+            .validate(),
+            Err(TransferError::InvalidBudget)
+        );
+        assert_eq!(
+            TransferBudget {
+                max_inflight_bytes: 1,
+                max_sources: 0,
+                max_retries: 1
+            }
+            .validate(),
+            Err(TransferError::InvalidBudget)
+        );
+        assert!(
+            TransferBudget {
+                max_inflight_bytes: 1,
+                max_sources: 1,
+                max_retries: 0
+            }
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]
@@ -139,8 +188,14 @@ mod tests {
 
     #[test]
     fn request_rejects_range_beyond_manifest_even_if_individually_valid() {
-        let m = Manifest { id: ContentId([0; 32]), size: 3 };
+        let m = Manifest {
+            id: ContentId([0; 32]),
+            size: 3,
+        };
         let r = ByteRange::new(0, 4, 4).unwrap();
-        assert_eq!(TransferRequest::new(m, r), Err(TransferError::InvalidRange));
+        assert_eq!(
+            TransferRequest::new(m, r),
+            Err(TransferError::InvalidRange)
+        );
     }
 }
