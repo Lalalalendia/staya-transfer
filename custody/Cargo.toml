@@ -10,6 +10,7 @@ resolver = "3"
 
 [dependencies]
 same-file = "=1.0.6"
+blake3 = "=1.8.5"
 
 [[bin]]
 name = "staya-custody-worker"
