@@ -201,7 +201,8 @@ async fn real_quic_get_proof_verifies_and_unknown_peer_cannot_read() {
 
         // A forged root or mutated proof MUST never become verified bytes.
         let mut corrupt = remote_proof.clone();
-        corrupt[corrupt.len() / 2] ^= 0x08;
+        let flip_at = corrupt.len() / 2;
+        corrupt[flip_at] ^= 0x08;
         assert!(matches!(
             verify_bao_range(&request, &corrupt),
             Err(TransferError::CorruptData)
