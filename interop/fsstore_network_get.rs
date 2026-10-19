@@ -157,9 +157,9 @@ async fn direct_quic_get_bao_peer_policy_reconnect() {
         };
 
         let first = tokio::time::timeout(
-            STEP_TIMEOUT, bounded_wire_get(&connection, wanted, FIRST)
+            STEP_TIMEOUT, bounded_wire_get(&connection, wanted, FIRST.clone())
         ).await.expect("first GET deadline").expect("first wire response");
-        verify_network_response(manifest, FIRST, &first, &data).expect("Staya independently verified on-wire proof");
+        verify_network_response(manifest, FIRST.clone(), &first, &data).expect("Staya independently verified on-wire proof");
 
         // Negative proof fixtures mutate the *captured wire response*, never
         // the FsStore, and may not mint a verified range.
@@ -167,25 +167,25 @@ async fn direct_quic_get_bao_peer_policy_reconnect() {
         let flip = tampered.len() / 2;
         tampered[flip] ^= 0x80;
         assert!(matches!(
-            verify_network_response(manifest, FIRST, &tampered, &data),
+            verify_network_response(manifest, FIRST.clone(), &tampered, &data),
             Err(TransferError::CorruptData)
         ));
         let mut appended = first.clone();
         appended.push(0);
         assert!(matches!(
-            verify_network_response(manifest, FIRST, &appended, &data),
+            verify_network_response(manifest, FIRST.clone(), &appended, &data),
             Err(TransferError::CorruptData)
         ));
         let mut wrong_size = first.clone();
         wrong_size[..8].copy_from_slice(&(manifest.size + 1).to_le_bytes());
         assert!(matches!(
-            verify_network_response(manifest, FIRST, &wrong_size, &data),
+            verify_network_response(manifest, FIRST.clone(), &wrong_size, &data),
             Err(TransferError::CorruptData)
         ));
 
         // Authorized transport identity does not confer access to other hash.
         let forbidden_attempt = tokio::time::timeout(
-            STEP_TIMEOUT, bounded_wire_get(&connection, forbidden_tag.hash, FIRST)
+            STEP_TIMEOUT, bounded_wire_get(&connection, forbidden_tag.hash, FIRST.clone())
         ).await.expect("forbidden hash request settled");
         assert!(forbidden_attempt.is_err() || forbidden_attempt.unwrap().len() < 8,
             "unlisted hash GET unexpectedly returned content");
@@ -218,7 +218,7 @@ async fn direct_quic_get_bao_peer_policy_reconnect() {
         let outsider = local_endpoint(outsider_key).await;
         if let Ok(untrusted) = outsider.connect(address.clone(), iroh_blobs::ALPN).await {
             let result = tokio::time::timeout(
-                STEP_TIMEOUT, bounded_wire_get(&untrusted, wanted, FIRST)
+                STEP_TIMEOUT, bounded_wire_get(&untrusted, wanted, FIRST.clone())
             ).await.expect("outsider GET settled");
             assert!(result.is_err() || result.unwrap().len() < 8, "unknown peer received bytes");
             untrusted.close(0u8.into(), b"reject outsider");
@@ -230,9 +230,9 @@ async fn direct_quic_get_bao_peer_policy_reconnect() {
         let reconnected = client.connect(address, iroh_blobs::ALPN)
             .await.expect("new QUIC connection");
         let second = tokio::time::timeout(
-            STEP_TIMEOUT, bounded_wire_get(&reconnected, wanted, SECOND)
+            STEP_TIMEOUT, bounded_wire_get(&reconnected, wanted, SECOND.clone())
         ).await.expect("second GET deadline").expect("second wire response");
-        verify_network_response(manifest, SECOND, &second, &data)
+        verify_network_response(manifest, SECOND.clone(), &second, &data)
             .expect("new QUIC connection independently validated second range");
 
         if let Ok(dest) = std::env::var("STY_QUIC_OUTPUT_DIR") {
