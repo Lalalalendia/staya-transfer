@@ -4,6 +4,8 @@
 #[cfg(windows)]
 pub mod ipc;
 #[cfg(windows)]
+pub mod overlapped;
+#[cfg(windows)]
 pub mod windows;
 #[cfg(not(windows))]
 compile_error!("G2-05h3f is Windows-only; no Linux production claim");
