@@ -68,7 +68,31 @@ fn from_hex(text: &str) -> Result<Vec<u8>, String> {
 fn private_root(label: &str) -> Result<PathBuf, String> {
     let nonce = SecretKey::generate().public().to_string();
     let root = std::env::temp_dir().join(format!("staya-direct-preview-{label}-{nonce}"));
-    fs::create_dir(&root).map_err(|e| format!("private staging directory: {e}"))?;
+    // A random name does not imply confidentiality: create_dir with a
+    // permissive umask can expose actual staged bytes to other local users.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+            .create(&root)
+            .map_err(|e| format!("private staging directory: {e}"))?;
+        let mode = fs::symlink_metadata(&root)
+            .map_err(|e| format!("check new staging directory: {e}"))?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode != 0o700 {
+            return Err("staging directory must be owner-only mode 0700".into());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows inherits TEMP's ACL. This manual preview does NOT attest
+        // production-grade Windows local ACL isolation.
+        fs::create_dir(&root).map_err(|e| format!("staging directory: {e}"))?;
+    }
     Ok(root)
 }
 

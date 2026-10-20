@@ -10,6 +10,8 @@ First, on the intended receiver, run \`staya-direct-preview receive\`. It prints
 
 The source must be one explicit nonempty regular file at most 8 MiB; no directory enumeration, symlink, or peer-selected filenames. Server provider policy denies any QUIC peer ID other than the manually admitted ephemeral receiver, any GET hash except the chosen BLAKE3 root, GET_MANY, PUSH, and observe. Only direct Iroh QUIC works: relay disabled, therefore NAT/IPv4 routing may prevent connections. This is not a universal two-device connectivity claim.
 
+On Unix the random staging directory is created with explicitly enforced mode `0700`; the independent subprocess test inspects its actual resulting mode. On Windows the temporary directory inherits the user's configured `TEMP` ACL, which is **not independently hardened or proven against local attackers** in this manual preview. The preview is not suitable for sensitive user files until Windows ACL isolation and hostile filesystem races have separate acceptance.
+
 Receiver retains its ephemeral private key **only in memory**, uses the manually trusted one-shot CONNECT line as the endpoint address and immutable root/size, makes 64 KiB bounded QUIC GETs, checks independent Bao against the trusted root before every import, and stages to a random temporary \`FsStore\` held by an exclusive OS lease and bounded per-range admission. After actor shutdown it independently re-reads every physical data+outboard Bao group and rechecks the complete BLAKE3; only then it creates \`verified-staged.bin\` inside its private random temporary directory with \`create_new\` and syncs the file. It prints \`NOT_APPLIED=true\`.
 
 ## Acceptance and limitations

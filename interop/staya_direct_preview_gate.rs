@@ -171,6 +171,15 @@ fn one_manual_direct_file_two_os_processes_and_unlisted_peer_denied() {
             .to_string_lossy()
             .starts_with("staya-direct-preview-receiver-")
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&staging_root).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "real staged file must not be in a group/world-readable directory"
+        );
+    }
     assert_eq!(fs::read(&staged).unwrap(), payload);
     assert!(
         exited(&mut permitted.0).success(),
