@@ -1,0 +1,11 @@
+[package]
+name = "staya-native-parent-lab"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+# This independent Linux laboratory has no Staya Core/Akula dependencies.
+# Native FFI is confined here; custody/src/lib.rs keeps forbid(unsafe_code).
+[workspace]
+resolver = "3"
