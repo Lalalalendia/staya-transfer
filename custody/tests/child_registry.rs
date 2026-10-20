@@ -127,3 +127,35 @@ fn never_armed_child_is_killed_and_closed_registry_cannot_reopen() {
     drop(lease);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn writer_id_is_bound_to_its_registry_and_cannot_arm_another_session() {
+    let a_root = root("owner-identity-a");
+    let b_root = root("owner-identity-b");
+    let a = WriterProcessRegistry::new(1).unwrap();
+    let b = WriterProcessRegistry::new(1).unwrap();
+    let a_id = a.spawn_unarmed(waiting_child(&a_root)).unwrap();
+    let b_id = b.spawn_unarmed(waiting_child(&b_root)).unwrap();
+    assert_ne!(a_id, b_id, "separate registries must not reuse ARM identities");
+    assert!(a.arm(b_id).is_err(), "wrong-registry ARM must be denied");
+    assert!(b.arm(a_id).is_err(), "wrong-registry ARM must be denied");
+    // Cross-registry denial must NOT disturb the correctly registered worker.
+    a.arm(a_id).unwrap();
+    expect_child_owns_store(&a_root);
+    let cold = StoreLease::acquire(&b_root).expect("other registry remained unarmed");
+    drop(cold);
+    assert_eq!(
+        a.close_and_reap(Duration::from_secs(15)).unwrap(),
+        ReapedChildren { count: 1 }
+    );
+    assert_eq!(
+        b.close_and_reap(Duration::from_secs(15)).unwrap(),
+        ReapedChildren { count: 1 }
+    );
+    for path in [a_root, b_root] {
+        let next = StoreLease::acquire(&path).expect("no surviving cross-owner writer");
+        next.validate_fence().unwrap();
+        drop(next);
+        fs::remove_dir_all(path).unwrap();
+    }
+}

@@ -9,13 +9,19 @@ use std::{
     collections::HashMap,
     io::{self, Write},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{Mutex, MutexGuard},
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
 
 const POLL: Duration = Duration::from_millis(10);
 const MAX_CHILDREN: usize = 64;
+// In-process owner identity: prevents accidental cross-session ARM/reap ID reuse.
+// Not a cross-process, cryptographic, or remotely delegated capability.
+static NEXT_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
 
 fn deny(reason: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, reason)
@@ -23,7 +29,10 @@ fn deny(reason: &'static str) -> io::Error {
 
 /// Registry-local opaque identifier, not a network credential or grant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct WriterId(u64);
+pub struct WriterId {
+    registry_id: u64,
+    sequence: u64,
+}
 
 /// Actual Child handles reaped; NEVER an FsStore-quiescence witness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +54,7 @@ struct State {
 
 /// Only this owner may start/ARM registered children. Use Arc for local races.
 pub struct WriterProcessRegistry {
+    registry_id: u64,
     max_children: usize,
     state: Mutex<State>,
 }
@@ -57,7 +67,11 @@ impl WriterProcessRegistry {
                 "invalid writer registry capacity",
             ));
         }
+        let registry_id = NEXT_REGISTRY_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map_err(|_| io::Error::other("registry owner identity exhausted: HOLD"))?;
         Ok(Self {
+            registry_id,
             max_children,
             state: Mutex::new(State {
                 accepting: true,
@@ -100,7 +114,10 @@ impl WriterProcessRegistry {
             let _ = child.wait();
             return Err(io::Error::other("missing child ARM control pipe"));
         };
-        let id = WriterId(state.next_id);
+        let id = WriterId {
+            registry_id: self.registry_id,
+            sequence: state.next_id,
+        };
         state.next_id = next_id;
         state.children.insert(
             id,
