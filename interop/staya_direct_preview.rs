@@ -7,7 +7,7 @@
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, endpoint::presets, protocol::Router};
 use iroh_blobs::{
     BlobsProtocol, Hash,
-    protocol::{ChunkRanges, GetRequest, Request},
+    protocol::{ChunkRanges, ChunkRangesExt, GetRequest, Request},
     provider::events::{
         AbortReason, ConnectMode, EventMask, EventSender, ObserveMode, ProviderMessage,
         RequestMode, ThrottleMode,
@@ -24,7 +24,7 @@ use staya_transfer::{
     recovery::{BaoStorageProfile, StoreIdentity},
 };
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     str::FromStr,

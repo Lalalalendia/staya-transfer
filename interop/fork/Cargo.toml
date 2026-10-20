@@ -45,3 +45,11 @@ path = "../fsstore_enospc_gate.rs"
 [[test]]
 name = "fsstore_many_ranges_gate"
 path = "../fsstore_many_ranges_gate.rs"
+
+[[bin]]
+name = "staya-direct-preview"
+path = "../staya_direct_preview.rs"
+
+[[test]]
+name = "staya_direct_preview_gate"
+path = "../staya_direct_preview_gate.rs"
