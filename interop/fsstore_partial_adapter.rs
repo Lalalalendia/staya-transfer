@@ -135,6 +135,46 @@ pub async fn stage_with_inflight_budget(
     Ok((accepted, permit))
 }
 
+/// G1k: a complete object smaller than one 16 KiB Bao storage group
+/// may be persisted inline in the pinned FsStore, with no .data/.obao4
+/// pair on disk. After the importing actor has cleanly stopped, open a new
+/// actor, read the physical persisted blob, and rehash the COMPLETE bytes
+/// against the immutable locally pinned BLAKE3 root. This is not durable
+/// checkpoint proof or file-publication authority.
+#[allow(
+    dead_code,
+    reason = "G1k preview uses cold small-object audit, not all fixtures"
+)]
+pub async fn audit_cold_small_complete_object(
+    private_root: &Path,
+    expected: StoreIdentity,
+) -> Result<Vec<u8>, String> {
+    const GROUP_BYTES: u64 = 16 * 1024;
+    if expected.profile != BaoStorageProfile::IrohBlobs0103PreOrder16KiB
+        || expected.manifest.size == 0
+        || expected.manifest.size >= GROUP_BYTES
+    {
+        return Err("small-object audit requires 1..16383 bytes and pinned Bao profile".into());
+    }
+    let hash = Hash::from_bytes(expected.manifest.id.0);
+    let cold = FsStore::load(private_root)
+        .await
+        .map_err(|e| format!("cold reload of small private FsStore: {e}"))?;
+    let recovered = cold.blobs().get_bytes(hash).await;
+    let closed = cold.shutdown().await;
+    drop(cold);
+    closed.map_err(|e| format!("quiesce cold small private FsStore: {e}"))?;
+    let recovered =
+        recovered.map_err(|e| format!("small complete object not present in cold FsStore: {e}"))?;
+    let bytes = recovered.as_ref();
+    if bytes.len() as u64 != expected.manifest.size
+        || blake3::hash(bytes).as_bytes() != &expected.manifest.id.0
+    {
+        return Err("small cold persisted object failed pinned complete-root BLAKE3".into());
+    }
+    Ok(bytes.to_vec())
+}
+
 /// Reconstruct proof from **actual test-only private** FsStore data/outboard
 /// after a CLEAN shutdown and verify it independently through Staya.
 ///

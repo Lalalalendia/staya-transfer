@@ -403,16 +403,23 @@ async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
     drop(actor);
     // Filesystem readback is independently Bao-authenticated for every group;
     // receiving GET bytes or an FsStore bitmap is not a durable receipt.
-    let mut audited = Vec::with_capacity(size as usize);
-    let mut offset = 0u64;
-    while offset < size {
-        let end = offset.saturating_add(RANGE).min(size);
-        let range = ByteRange::new(offset, end, size).map_err(|e| format!("{e:?}"))?;
-        audited.extend(partial_adapter::audit_clean_closed_fixture(
-            &root, identity, range,
-        )?);
-        offset = end;
-    }
+    let audited = if size < 16 * 1024 {
+        // Pinned FsStore can store tiny complete objects inline, with no
+        // physical .data/.obao4 files. Cold reopen and verify its full root.
+        partial_adapter::audit_cold_small_complete_object(&root, identity).await?
+    } else {
+        let mut audited = Vec::with_capacity(size as usize);
+        let mut offset = 0u64;
+        while offset < size {
+            let end = offset.saturating_add(RANGE).min(size);
+            let range = ByteRange::new(offset, end, size).map_err(|e| format!("{e:?}"))?;
+            audited.extend(partial_adapter::audit_clean_closed_fixture(
+                &root, identity, range,
+            )?);
+            offset = end;
+        }
+        audited
+    };
     if audited.len() as u64 != size || *blake3::hash(&audited).as_bytes() != manifest.id.0 {
         return Err("cold physical readback did not match the trusted root".into());
     }
