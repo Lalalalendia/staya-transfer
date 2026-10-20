@@ -1,0 +1,15 @@
+# ADR-0021 — STY-G2-06d Windows TerminateProcess safe fallback + direct QUIC
+
+This is an isolated TEST gate, stacked on [PR #29](https://github.com/Lalalalendia/staya-transfer/pull/29) and the G2-06 release checklist [#23](https://github.com/Lalalalendia/staya-transfer/issues/23). Neither Akula nor File Gate are modified.
+
+## Test proof
+- Use two **real independent Windows processes**. A provider accepts only the authorized direct QUIC peer and immutable BLAKE3 object hash. The receiver child accepts one 16-KiB-aligned interior GET, validates it against the locally trusted BLAKE3 root and exact size and stages in a pinned release/fork FsStore under a held OS StoreLease.
+- Before child death, another process MUST be refused custody. Parent calls real Windows `TerminateProcess` (`Child::kill`) without any FsStore shutdown, waits for process termination and independently regains ownership.
+- Since directory durability is unproven, no partial checkpoint is authorized. Old bytes, even if they survived, MUST NOT be reused or counted as verified. Start a NEW private FsStore with an independent lock, open a NEW real direct QUIC connection and GET the **entire** immutable object in sequential, Bao-aligned ranges bounded by Staya's existing 1 MiB per-range limit. An oversized range MUST remain rejected by the **planner budget** and **Bao verifier** (`InvalidBudget`); `TransferRequest::new` alone validates geometry and must not be mistaken for a budget gate. The actual QUIC GETs remain within the existing 1 MiB limit. The private `bounded_wire_get` integration harness itself also rejects a range larger than that limit **before sending**; this is a laboratory guard, not a production File Gate.
+- Independently validate the full Bao response and fully reassembled pinned FsStore object against local BLAKE3 root and original bytes, then cleanly stop actor. Record exact requested ranges, raw first/full GET proof bytes and compare release/fork byte-for-byte in Windows CI.
+- Pinned lockfile `--locked` release/fork, Clippy, rustfmt and native Windows process kill all required before this narrow PR can be accepted. No status is green by virtue of authoring this PR.
+
+## Deliberate exclusions
+No Windows power-loss barrier, no retained-range resume or partial checkpoint after TerminateProcess, no actual provider relay, WAN or second physical host, no Akula user files or Vault/File Gate rights, no production-safe subprocess supervisor, no Linux inherited-fd race proof, and no close of all seven G2-06 conditions. The parent harness retains first raw network proof only as **test input**; a production receiver must never treat that as a trusted checkpoint without new physical root-backed verification.
+
+**Failure policy:** if the old store has a candidate despite lack of proven Windows directory durability, fail the test. If permission errors prevent acquiring an independent new store, fail; never retry silently to mask custody bugs. If the redownload or full BLAKE3 does not match, fail closed. Power-loss durable skip remains unsupported.

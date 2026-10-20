@@ -105,6 +105,13 @@ async fn bounded_wire_get(
     hash: Hash,
     range: std::ops::Range<u64>,
 ) -> Result<Vec<u8>, String> {
+    // The private wire harness must not bypass the same range ceiling as the
+    // planner and Bao decoder, even when called directly by a test.
+    if range.start >= range.end
+        || range.end - range.start > staya_transfer::planner::MAX_PLANNED_RANGE_BYTES
+    {
+        return Err("GET exceeds Staya's 1 MiB per-range budget".to_owned());
+    }
     let get = GetRequest::blob_ranges(hash, ChunkRanges::bytes(range));
     let request = postcard::to_stdvec(&Request::Get(get))
         .map_err(|e| format!("serialize get request: {e}"))?;
@@ -862,4 +869,306 @@ async fn linux_killed_receiver_redownloads_uncommitted_or_resumes_verified() {
     })
     .await
     .expect("bounded Linux real-process crash QUIC integration");
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_terminated_receiver_requires_new_full_quic_transfer() {
+    use partial_adapter::stage_with_inflight_budget;
+    use staya_custody_lab::{
+        StoreLease,
+        admission::{Limits, SharedAdmission},
+        checkpoint::{IROH_PREORDER_16K, read_candidates},
+    };
+    use staya_transfer::recovery::{BaoStorageProfile, StoreIdentity};
+    use std::{
+        io,
+        path::PathBuf,
+        process::{Child, Command, Stdio},
+        sync::atomic::AtomicBool,
+        thread,
+        time::Instant,
+    };
+
+    const START: u64 = 32_768;
+    const END: u64 = 196_608;
+    const CHILD_FLAG: &str = "STY_G2_06D_CHILD";
+    const CHILD_ROOT: &str = "STY_G2_06D_ROOT";
+    const READY: &str = ".g2-06d-ready";
+    const FIRST_WIRE: &str = ".g2-06d-first.wire";
+
+    struct StopChild(Child);
+    impl Drop for StopChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    if std::env::var_os(CHILD_FLAG).is_some() {
+        let dir = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("child root supplied"));
+        let lease = StoreLease::acquire(&dir).expect("child exclusive Windows custody");
+        let data = deterministic_bytes();
+        let trusted = Hash::new(&data);
+        let manifest = Manifest {
+            id: ContentId(*trusted.as_bytes()),
+            size: data.len() as u64,
+        };
+        let identity = StoreIdentity {
+            manifest,
+            profile: BaoStorageProfile::IrohBlobs0103PreOrder16KiB,
+        };
+        let first = fs::read(dir.join(FIRST_WIRE)).expect("real first GET saved for child");
+        verify_network_response(manifest, START..END, &first, &data)
+            .expect("received Bao must match trusted immutable root");
+        let actor = FsStore::load(&dir)
+            .await
+            .expect("real pinned receiver FsStore");
+        let budget = SharedAdmission::new(Limits {
+            max_partial_objects: 1,
+            max_reserved_bytes: 2 * 1024 * 1024,
+            max_open_handles: 4,
+            max_retries_per_object: 0,
+        })
+        .unwrap();
+        let stop = AtomicBool::new(false);
+        let range = ByteRange::new(START, END, manifest.size).unwrap();
+        let (_imported, _permit) =
+            stage_with_inflight_budget(&lease, &budget, &actor, identity, range, &first, &stop)
+                .await
+                .expect("bounded verified import before TerminateProcess");
+        lease.validate_fence().unwrap();
+        fs::write(dir.join(READY), b"uncommitted").unwrap();
+        tokio::time::sleep(Duration::from_secs(100)).await;
+        panic!("child should have been forcibly terminated by Windows parent");
+    }
+
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let base = std::env::temp_dir().join(format!(
+            "staya-g2-06d-win-{}-{}",
+            std::process::id(),
+            std::env::var("STY_INTEROP_VARIANT").unwrap_or_else(|_| "ci".to_owned()),
+        ));
+        assert!(!base.exists(), "private test root must be new");
+        fs::create_dir(&base).unwrap();
+        let provider_dir = base.join("provider");
+        let failed_dir = base.join("killed");
+        let fresh_dir = base.join("retry");
+        fs::create_dir(&provider_dir).unwrap();
+        fs::create_dir(&failed_dir).unwrap();
+        fs::create_dir(&fresh_dir).unwrap();
+
+        let data = deterministic_bytes();
+        let trusted = Hash::new(&data);
+        let manifest = Manifest {
+            id: ContentId(*trusted.as_bytes()),
+            size: data.len() as u64,
+        };
+        let identity = StoreIdentity {
+            manifest,
+            profile: BaoStorageProfile::IrohBlobs0103PreOrder16KiB,
+        };
+        let provider = FsStore::load(&provider_dir).await.unwrap();
+        let retained = provider.add_slice(&data).await.unwrap();
+        assert_eq!(retained.hash, trusted);
+        let peer_key = SecretKey::generate();
+        let (events, policy_worker, _refused) =
+            deny_by_default(peer_key.public(), trusted);
+        let server_endpoint = local_endpoint(SecretKey::generate()).await;
+        let router = Router::builder(server_endpoint)
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&provider, Some(events)))
+            .spawn();
+        let client = local_endpoint(peer_key).await;
+        let address = router.endpoint().addr();
+
+        let first_connection = client.connect(address.clone(), iroh_blobs::ALPN)
+            .await
+            .expect("first authenticated direct QUIC connection");
+        let first = tokio::time::timeout(
+            STEP_TIMEOUT,
+            bounded_wire_get(&first_connection, trusted, START..END),
+        )
+        .await
+        .expect("bounded first GET")
+        .expect("real first GET bytes");
+        verify_network_response(manifest, START..END, &first, &data).unwrap();
+        first_connection.close(0u8.into(), b"before Windows process crash");
+        drop(first_connection);
+        fs::write(failed_dir.join(FIRST_WIRE), &first).unwrap();
+
+        let worker = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("windows_terminated_receiver_requires_new_full_quic_transfer")
+            .arg("--nocapture")
+            .env(CHILD_FLAG, "1")
+            .env(CHILD_ROOT, &failed_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("real independent Windows receiver process");
+        let mut child = StopChild(worker);
+        let marker = failed_dir.join(READY);
+        let started = Instant::now();
+        while !marker.exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "receiver stopped before crash cut-point"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(45),
+                "receiver did not stage the real QUIC data in time"
+            );
+            thread::sleep(Duration::from_millis(40));
+        }
+        assert_eq!(fs::read(&marker).unwrap(), b"uncommitted");
+        let busy = StoreLease::acquire(&failed_dir).expect_err("live child must own FsStore");
+        assert!(
+            matches!(busy.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied),
+            "second writer was blocked for an unrelated reason: {busy}"
+        );
+        child.0.kill().expect("Windows TerminateProcess");
+        let result = child.0.wait().expect("reap receiver after process termination");
+        assert!(!result.success(), "worker exited normally");
+        drop(child);
+
+        // Even if all partial bytes happen to survive process termination,
+        // there was no durable checkpoint. NEVER authorize an optimistic skip.
+        let former = StoreLease::acquire(&failed_dir)
+            .expect("recover Windows OS custody from terminated child");
+        let candidates = read_candidates(
+            &former,
+            manifest.id.0,
+            manifest.size,
+            IROH_PREORDER_16K,
+        )
+        .expect("untrusted checkpoint metadata must parse fail-closed");
+        assert!(candidates.is_empty(), "terminated actor minted a checkpoint");
+        let retry = StoreLease::acquire(&fresh_dir)
+            .expect("separate retry store requires separate exclusive ownership");
+        let receiver = FsStore::load(&fresh_dir)
+            .await
+            .expect("fresh real pinned FsStore after TerminateProcess");
+
+        let second_connection = client.connect(address, iroh_blobs::ALPN)
+            .await
+            .expect("second authenticated direct QUIC connection");
+        // TransferRequest::new checks geometry, not bandwidth. The actual
+        // one-MiB gates are the planner's budget and Bao verifier. A full
+        // object must be fetched in individually bounded Bao-aligned groups.
+        let cap = staya_transfer::planner::MAX_PLANNED_RANGE_BYTES;
+        assert_eq!(cap % (16 * 1024), 0);
+        assert!(manifest.size > cap, "exercise the full-download budget boundary");
+        let oversized = TransferRequest::new(
+            manifest,
+            ByteRange::new(0, manifest.size, manifest.size).unwrap(),
+        )
+        .expect("geometry is valid; the Bao budget gate must reject it");
+        assert!(
+            matches!(
+                verify_bao_range(&oversized, &[]),
+                Err(TransferError::InvalidBudget)
+            ),
+            "oversized Bao range must be rejected before decoding"
+        );
+        let empty = staya_transfer::planner::VerifiedCheckpoint::empty(manifest);
+        assert!(matches!(
+            staya_transfer::planner::MissingRanges::from_checkpoint(
+                manifest,
+                &empty,
+                staya_transfer::TransferBudget {
+                    max_inflight_bytes: cap + 1,
+                    max_sources: 1,
+                    max_retries: 0,
+                }
+            ),
+            Err(TransferError::InvalidBudget)
+        ));
+        assert_eq!(
+            bounded_wire_get(&second_connection, trusted, 0..manifest.size)
+                .await
+                .expect_err("the wire harness must refuse an oversized request before I/O"),
+            "GET exceeds Staya's 1 MiB per-range budget"
+        );
+        let requested = [(0, cap), (cap, manifest.size)];
+        let quota = SharedAdmission::new(Limits {
+            max_partial_objects: 1,
+            max_reserved_bytes: 4 * 1024 * 1024,
+            max_open_handles: 4,
+            max_retries_per_object: 0,
+        })
+        .unwrap();
+        let stop = AtomicBool::new(false);
+        let mut recovered_wires = Vec::new();
+        for &(start, end) in &requested {
+            assert!(end > start && end - start <= cap);
+            let wire = tokio::time::timeout(
+                STEP_TIMEOUT,
+                bounded_wire_get(&second_connection, trusted, start..end),
+            )
+            .await
+            .expect("bounded post-kill QUIC GET deadline")
+            .expect("actual post-kill QUIC range");
+            verify_network_response(manifest, start..end, &wire, &data)
+                .expect("each bounded GET carries valid root-anchored Bao proof");
+            let range = ByteRange::new(start, end, manifest.size).unwrap();
+            let (_accepted, permit) = stage_with_inflight_budget(
+                &retry, &quota, &receiver, identity, range, &wire, &stop,
+            )
+            .await
+            .expect("fresh store imports verified bounded QUIC range");
+            drop(permit);
+            assert_eq!(quota.usage().unwrap(), (0, 0, 0));
+            recovered_wires.push(wire);
+        }
+        assert_eq!(recovered_wires.len(), requested.len());
+        assert_eq!(
+            requested.iter().map(|(start, end)| end - start).sum::<u64>(),
+            manifest.size,
+            "fallback must re-download every byte without trusting killed store"
+        );
+        let complete = receiver
+            .blobs()
+            .get_bytes(trusted)
+            .await
+            .expect("FsStore exposes newly downloaded complete blob");
+        assert_eq!(Hash::new(complete.as_ref()), trusted);
+        assert_eq!(complete.as_ref(), data.as_slice());
+
+        if let Some(directory) = std::env::var_os("STY_G2_06D_OUTPUT_DIR") {
+            let evidence = PathBuf::from(directory);
+            fs::create_dir_all(&evidence).unwrap();
+            fs::write(evidence.join("first.wire"), &first).unwrap();
+            fs::write(evidence.join("redownload-0.wire"), &recovered_wires[0]).unwrap();
+            fs::write(evidence.join("redownload-1.wire"), &recovered_wires[1]).unwrap();
+            fs::write(
+                evidence.join("inventory.txt"),
+                format!(
+                    "mode=windows_uncommitted_terminate\nfirst_get={START}-{END}\ncheckpoint_candidates=0\nrecovery_get=0-{}\nrecovery_get={}-{}\nfull_blake3={}\nwindows_durable_skip=false\n",
+                    requested[0].1,
+                    requested[1].0,
+                    requested[1].1,
+                    trusted.to_hex(),
+                ),
+            )
+            .unwrap();
+        }
+
+        second_connection.close(0u8.into(), b"safe full retry passed");
+        receiver.shutdown().await.unwrap();
+        drop(receiver);
+        drop(retry);
+        drop(former);
+        router.shutdown().await.unwrap();
+        client.close().await;
+        policy_worker.abort();
+        drop(retained);
+        drop(provider);
+        fs::remove_dir_all(base).expect("delete only private test fixture");
+        println!(
+            "STY_G2_06D actual_windows_terminate=true new_quic_connection=true old_untrusted_bytes_skipped=false full_redownload=true full_blake3=true durable_window_checkpoint=false file_gate=false relay=false"
+        );
+    })
+    .await
+    .expect("bounded Windows TerminateProcess and QUIC full-redownload integration");
 }
