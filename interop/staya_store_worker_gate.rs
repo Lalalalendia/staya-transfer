@@ -1,8 +1,8 @@
 //! G2-05h3g: real pinned FsStore under Linux PDEATHSIG / Windows JobObject.
 //! Independent observer kills its launcher and verifies native worker death,
 //! cooperative OS lock reacquisition and physical Bao against trusted BLAKE3.
-//! Linux verifies kernel-bound IPC before store open; still no executable
-//! attestation, clean shutdown, durable grant or File Gate authorization.
+//! Linux/Windows verify kernel-backed IPC before store open; still no signed
+//! executable attestation, clean shutdown, durable grant or File Gate.
 
 use bao_tree::{
     BaoTree, BlockSize, ByteRanges,
@@ -25,7 +25,10 @@ use std::{
 #[cfg(target_os = "linux")]
 use staya_native_parent_lab::{ipc::spawn_unarmed, linux::PidFd};
 #[cfg(windows)]
-use staya_windows_job_lab::windows::{ProcessWatcher, SuspendedJobWorker};
+use staya_windows_job_lab::{
+    ipc::PendingPipe,
+    windows::{ProcessWatcher, SuspendedJobWorker},
+};
 
 const LAUNCHER_ENV: &str = "STY_G2_05H3G_LAUNCHER_ROOT";
 const TEST_NAME: &str = "real_fsstore_native_containment_survives_parent_kill";
@@ -80,20 +83,27 @@ fn launcher(root: &Path) -> io::Result<()> {
     let pid = linux_running.process_id();
 
     #[cfg(windows)]
-    let running = {
+    let (running, authenticated_pipe) = {
+        // First-party private pipe exists before any worker process starts.
+        let private_pipe = PendingPipe::create()?;
         let args = vec![
             root.as_os_str().to_os_string(),
             process::id().to_string().into(),
+            private_pipe.name().into(),
         ];
         let suspended = SuspendedJobWorker::create(executable, &args)?;
-        if root.join(WORKER_READY).exists() {
-            return Err(io::Error::other("worker started before Job assignment"));
+        if root.join(".staya-writer.lock").exists() || root.join("data").exists() {
+            return Err(io::Error::other("FsStore opened before Job assignment: HOLD"));
         }
         let assigned = suspended.assign()?;
-        if root.join(WORKER_READY).exists() {
-            return Err(io::Error::other("worker executed before Job assignment"));
+        if root.join(".staya-writer.lock").exists() || root.join("data").exists() {
+            return Err(io::Error::other("FsStore opened before Windows ARM: HOLD"));
         }
-        assigned.resume()?
+        let running = assigned.resume()?;
+        // The worker is already under KILL_ON_JOB_CLOSE, but cannot open
+        // StoreLease until its peer's kernel PID and nonce are verified.
+        let pipe = private_pipe.arm(running.process_id())?;
+        (running, pipe)
     };
     #[cfg(windows)]
     let pid = running.process_id();
@@ -126,6 +136,8 @@ fn launcher(root: &Path) -> io::Result<()> {
     publish(root, LAUNCHER_READY, b"WORKER_OS_OWNED_REAL_FSSTORE")?;
     #[cfg(windows)]
     let _keep_job_owner = running;
+    #[cfg(windows)]
+    let _keep_authenticated_pipe = authenticated_pipe;
     #[cfg(target_os = "linux")]
     let _keep_kernel_ipc_owner = linux_running;
     loop {
@@ -377,4 +389,126 @@ fn real_fsstore_ipc_denies_missing_socket_before_custody() {
     assert!(!status.success(), "no IPC socket must fail closed");
     assert_ipc_has_not_created_custody(&root);
     fs::remove_dir_all(root).expect("only own disposable data");
+}
+
+#[cfg(windows)]
+fn disposable_windows_ipc_root(case: &str) -> std::path::PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("valid Windows test clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "staya-g2-windows-real-ipc-{}-{case}-{stamp}",
+        process::id()
+    ));
+    assert!(!root.exists(), "do not reuse another Windows store");
+    fs::create_dir(&root).expect("create private IPC fixture root");
+    root
+}
+
+#[cfg(windows)]
+fn windows_real_worker(
+    root: &Path,
+    expected_parent: u32,
+    pipe_name: &str,
+) -> staya_windows_job_lab::windows::RunningJobWorker {
+    let args = vec![
+        root.as_os_str().to_os_string(),
+        expected_parent.to_string().into(),
+        pipe_name.into(),
+    ];
+    let suspended = SuspendedJobWorker::create(
+        Path::new(env!("CARGO_BIN_EXE_staya-store-worker")),
+        &args,
+    )
+    .expect("start actual suspended FsStore binary");
+    suspended
+        .assign()
+        .expect("attach job before any worker code")
+        .resume()
+        .expect("resume only after assignment")
+}
+
+#[cfg(windows)]
+fn assert_windows_no_custody(root: &Path) {
+    assert!(
+        !root.join(".staya-writer.lock").exists(),
+        "unverified Windows pipe must never open StoreLease"
+    );
+    assert!(
+        !root.join("data").exists(),
+        "unverified Windows pipe must never create FsStore data"
+    );
+    assert!(
+        !root.join(WORKER_READY).exists(),
+        "unverified Windows IPC must never publish READY"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn real_fsstore_windows_ipc_denies_unarmed_before_custody() {
+    let root = disposable_windows_ipc_root("unarmed");
+    let server = PendingPipe::create().expect("restricted named pipe");
+    let worker = windows_real_worker(&root, process::id(), server.name());
+    let witness = ProcessWatcher::open(worker.process_id()).expect("process wait handle");
+    thread::sleep(Duration::from_millis(120));
+    assert!(
+        !witness.exited(0).expect("worker kernel status"),
+        "worker must await ARM, not exit or open the store"
+    );
+    assert_windows_no_custody(&root);
+    drop(worker); // kernel Job close terminates blocked worker
+    assert!(witness.exited(5000).expect("bounded worker termination"));
+    assert_windows_no_custody(&root);
+    drop(server);
+    fs::remove_dir_all(root).expect("remove only own fixture");
+}
+
+#[cfg(windows)]
+#[test]
+fn real_fsstore_windows_ipc_denies_wrong_parent_before_custody() {
+    let root = disposable_windows_ipc_root("wrong-parent");
+    let server = PendingPipe::create().expect("restricted named pipe");
+    let worker = windows_real_worker(&root, u32::MAX, server.name());
+    let witness = ProcessWatcher::open(worker.process_id()).expect("process wait handle");
+    assert!(
+        witness.exited(8000).expect("worker must fail before StoreLease"),
+        "mismatched Windows launcher PID did not deny"
+    );
+    assert_windows_no_custody(&root);
+    drop(worker);
+    drop(server);
+    fs::remove_dir_all(root).expect("remove only own fixture");
+}
+
+#[cfg(windows)]
+#[test]
+fn real_fsstore_windows_ipc_denies_missing_pipe_before_custody() {
+    let root = disposable_windows_ipc_root("missing-pipe");
+    let no_server = r"\\.\pipe\staya-g2-05h3g3-99999-00000000000000000000000000000000";
+    let worker = windows_real_worker(&root, process::id(), no_server);
+    let witness = ProcessWatcher::open(worker.process_id()).expect("process wait handle");
+    assert!(
+        witness.exited(8000).expect("worker must fail before StoreLease"),
+        "missing pipe did not deny"
+    );
+    assert_windows_no_custody(&root);
+    drop(worker);
+    fs::remove_dir_all(root).expect("remove only own fixture");
+}
+
+#[cfg(windows)]
+#[test]
+fn real_fsstore_windows_ipc_denies_wrong_worker_pid_before_custody() {
+    let root = disposable_windows_ipc_root("wrong-client");
+    let server = PendingPipe::create().expect("restricted named pipe");
+    let worker = windows_real_worker(&root, process::id(), server.name());
+    assert!(
+        server.arm(u32::MAX).is_err(),
+        "named pipe client OS PID must match suspended Job worker PID"
+    );
+    assert_windows_no_custody(&root);
+    drop(worker); // cancel blocked unarmed child via kernel Job
+    fs::remove_dir_all(root).expect("remove only own fixture");
 }

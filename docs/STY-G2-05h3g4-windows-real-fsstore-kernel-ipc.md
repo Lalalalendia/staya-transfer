@@ -1,0 +1,9 @@
+# STY-G2-05h3g4 — kernel Windows named-pipe IPC before real pinned FsStore
+
+Follow-up integration to Draft Windows IPC bootstrap #62. The new real-writer code must not be accepted independently from the actual Windows Win32 native-host API and its stable/MSRV OS tests. The integrated Linux real FsStore kernel IPC comes from accepted #59.
+
+Windows launcher creates exactly one local-only restricted SID named-pipe instance BEFORE CREATE_SUSPENDED, attaches JobObject KILL_ON_JOB_CLOSE BEFORE ResumeThread and then calls PendingPipe.arm with the worker's kernel PID. The actual Windows staya-store-worker now requires a third argument (private pipe name), checks GetNamedPipeServerProcessId against live expected launcher PID and validates the exact nonce ARM/ACK BEFORE StoreLease::acquire or FsStore::load. Failure returns exit code 73 pre-custody; after store open, existing abort-on-error process protection remains.
+
+Four additional native Windows real-worker tests reject missing ARM, wrong launcher PID, missing server and wrong worker PID with no `.staya-writer.lock`, FsStore `data` directory or readiness marker. Existing Windows three-process TerminateProcess Job kill and independent physical Bao proof runs unchanged; pinned release and fork required. Linux real-worker behavior must continue to pass unchanged.
+
+Critical risk: the underlying Windows PendingPipe.arm / receive_parent_arm uses blocking synchronous Win32 IO; if the other process stalls, protocol operations do not have bounded production cancellation. This is a LAB-ONLY gate. It neither identifies a signed executable nor grants Akula File Gate, Quiescent/Released, durable resume, ALLOW/APPLIED/ACK. #26 and G2-06 remain HOLD. Next P0: Overlapped named-pipe IO with cancellation, timeout and tested OS process reap, then real cancellation while FsStore::load and shutdown execute.
