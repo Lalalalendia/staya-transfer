@@ -35,6 +35,23 @@ fn main() {
             let _ = io::stdin().read(&mut buf);
         }
         "probe" => {}
+        "checkpoint-publish" => {
+            use staya_custody_lab::checkpoint::{
+                CheckpointClaim, IROH_PREORDER_16K, publish_candidate,
+            };
+            let claim = CheckpointClaim {
+                sequence: 1,
+                content_root: [0x42; 32],
+                object_len: 1_048_593,
+                bao_profile: IROH_PREORDER_16K,
+                start: 0,
+                end: 16_384,
+            };
+            // The lab parent kills this process *inside* publish_candidate,
+            // not after a graceful Drop or after returning a metadata ACK.
+            let barrier = publish_candidate(&guard, claim).expect("lab checkpoint publication");
+            println!("METADATA_ONLY={barrier:?}");
+        }
         "checkpoint-read" => {
             // Metadata readback from another real OS process is still only
             // a claim inventory, NEVER independently verified Bao bytes.

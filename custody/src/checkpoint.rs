@@ -29,6 +29,23 @@ pub const MAX_ROOT_ENTRIES: usize = 512;
 /// The tested pinned 0.103.1 pre-order Bao encoding, 16 KiB groups.
 pub const IROH_PREORDER_16K: u32 = 1;
 
+#[cfg(all(unix, feature = "g2-cutpoint-lab"))]
+fn hold_for_real_sigkill(stage: &str) {
+    if std::env::var("STY_G2_06G_LAB_CHILD").as_deref() != Ok("1")
+        || std::env::var("STY_G2_06G_CUT").as_deref() != Ok(stage)
+    {
+        return;
+    }
+    // Only the explicit lab feature can enable this hook. The marker lives
+    // outside the private checkpoint root and is NEVER a trusted receipt.
+    let marker = std::env::var_os("STY_G2_06G_MARKER").expect("lab marker required");
+    fs::write(marker, stage.as_bytes()).expect("announce exact cut-point");
+    // The independent test parent MUST terminate this OS process with SIGKILL.
+    // If it fails to do so, abort rather than return or publish a fake ACK.
+    std::thread::sleep(std::time::Duration::from_secs(45));
+    std::process::abort();
+}
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -361,18 +378,28 @@ pub fn publish_candidate(
         .create_new(true)
         .open(&temporary)?;
     file.write_all(&encode(claim))?;
+    #[cfg(all(unix, feature = "g2-cutpoint-lab"))]
+    hold_for_real_sigkill("record-written");
     file.sync_all()?;
+    #[cfg(all(unix, feature = "g2-cutpoint-lab"))]
+    hold_for_real_sigkill("record-synced");
     drop(file);
     owner.validate_fence()?;
     // Unique generation names avoid unsafe overwrite of an existing "current".
     // Pathname races against hostile actors are NOT solved by this check.
     fs::rename(&temporary, &final_path)?;
+    #[cfg(all(unix, feature = "g2-cutpoint-lab"))]
+    hold_for_real_sigkill("renamed");
     owner.validate_fence()?;
     #[cfg(unix)]
     {
         // Linux/macOS same-volume directory barrier. Fail closed if unsupported.
         fs::File::open(owner.canonical_root())?.sync_all()?;
+        #[cfg(feature = "g2-cutpoint-lab")]
+        hold_for_real_sigkill("directory-synced");
         owner.validate_fence()?;
+        #[cfg(feature = "g2-cutpoint-lab")]
+        hold_for_real_sigkill("pre-ack");
         Ok(MetadataBarrier::FileAndDirectorySynced)
     }
     #[cfg(windows)]
