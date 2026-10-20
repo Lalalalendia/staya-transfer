@@ -12,6 +12,15 @@ fn main() {
     let root = args.next().expect("private local store path");
     assert!(args.next().is_none(), "unexpected input");
 
+    // Test-only registered-child contract. Without ARM, this process cannot
+    // acquire StoreLease. No attacker-supplied executable is accepted as proof.
+    if mode == "arm-hold" {
+        let mut arm = [0u8; 1];
+        if io::stdin().read_exact(&mut arm).is_err() || arm != *b"A" {
+            process::exit(8);
+        }
+    }
+
     let guard = match StoreLease::acquire(&root) {
         Ok(guard) => guard,
         Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -25,11 +34,21 @@ fn main() {
         }
     };
     guard.validate_fence().expect("fresh lease identity");
+    if mode == "arm-hold" {
+        // A disposable fixture handshake, not a persistent checkpoint or
+        // a grant. Parent must NOT race the one-shot child try_lock.
+        // The test subsequently verifies actual OS exclusion independently.
+        std::fs::write(
+            std::path::Path::new(&root).join(".g2-05h3c-fixture-lease-held"),
+            b"acquired",
+        )
+        .expect("publish lab-only ownership readiness");
+    }
     println!("ACQUIRED");
     io::stdout().flush().unwrap();
 
     match mode.as_str() {
-        "hold" => {
+        "hold" | "arm-hold" => {
             let mut buf = [0u8; 1];
             // Wait for parent to kill the process; an EOF also ends custody.
             let _ = io::stdin().read(&mut buf);
