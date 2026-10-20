@@ -47,7 +47,9 @@ jobs:
         run: |
           set -euo pipefail
           go test -count=1 ./...
-          test -z "$(gofmt -l .)"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            test -z "$(gofmt -l .)"
+          fi
       - name: Explicit release HOLD
         shell: bash
         run: |
