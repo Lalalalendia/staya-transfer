@@ -1,0 +1,69 @@
+name: STY owner deny-only OS-process CAS lab
+
+on:
+  push:
+    branches: ["experiment/sty-online-owner-ledger-*"]
+  pull_request:
+    paths:
+      - "interop/owner-witness-lab/**"
+      - "docs/ADR-0027-owner-deny-ledger-cas.md"
+      - ".github/workflows/owner-ledger-cas.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  owner-ledger-os-cas:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: No product authority scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          base='785f97be0a616dc7236791a05a40c2471700619a'
+          actual=set(subprocess.check_output(['git','diff','--name-only',base+'..HEAD'],text=True).splitlines())
+          expected={
+            'interop/owner-witness-lab/owner_ledger.go',
+            'interop/owner-witness-lab/ledger_lock_linux.go',
+            'interop/owner-witness-lab/ledger_lock_windows.go',
+            'interop/owner-witness-lab/owner_ledger_test.go',
+            'docs/ADR-0027-owner-deny-ledger-cas.md',
+            '.github/workflows/owner-ledger-cas.yml',
+          }
+          assert actual==expected, ('changed scope',actual^expected)
+          assert not any(n.startswith(('src/','custody/','interop/fork/')) for n in actual)
+          PY
+          git diff --check
+      - name: Real OS-process CAS, crash and rollback falsifier
+        working-directory: interop/owner-witness-lab
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 -v ./...
+          go vet ./...
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            test -z "$(gofmt -l .)"
+            go test -race -count=1 ./...
+          fi
+      - name: Explicitly retain HOLD on owner rollback and production access
+        shell: bash
+        run: |
+          echo 'OS-process CAS/locked readback is NOT independent antirollback of the owner.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Valid old owner-ledger snapshot replay remains a proven release blocker.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No product grant, File Gate write, QUIC permit, APPLIED or ACK.' >> "$GITHUB_STEP_SUMMARY"
