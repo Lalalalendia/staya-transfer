@@ -39,3 +39,9 @@ jobs:
         run: cargo test --manifest-path custody/Cargo.toml --locked --all-targets -- --nocapture
       - name: Rust Clippy deny warnings
         run: cargo clippy --manifest-path custody/Cargo.toml --locked --all-targets -- -D warnings
+      - name: STY-G2-06g1 Linux real SIGKILL checkpoint cut-points
+        if: runner.os == 'Linux'
+        run: cargo test --manifest-path custody/Cargo.toml --locked --features g2-cutpoint-lab --test checkpoint_cutpoints -- --nocapture
+      - name: Strict lint of disabled-by-default crash laboratory
+        if: runner.os == 'Linux'
+        run: cargo clippy --manifest-path custody/Cargo.toml --locked --features g2-cutpoint-lab --all-targets -- -D warnings

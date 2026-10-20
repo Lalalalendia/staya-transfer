@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.91"
 publish = false
 
+[features]
+# Disabled by default; only the isolated GitHub CI SIGKILL laboratory enables it.
+g2-cutpoint-lab = []
+
 [workspace]
 resolver = "3"
 
