@@ -26,14 +26,18 @@ fn capture(child: &mut Child) -> Receiver<String> {
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
-            if tx.send(line).is_err() { break; }
+            if tx.send(line).is_err() {
+                break;
+            }
         }
     });
     rx
 }
 
 fn next_line(lines: &Receiver<String>) -> String {
-    lines.recv_timeout(WAIT).expect("child did not announce bounded protocol line")
+    lines
+        .recv_timeout(WAIT)
+        .expect("child did not announce bounded protocol line")
 }
 
 fn exited(child: &mut Child) -> ExitStatus {
@@ -61,10 +65,12 @@ fn new_receiver() -> (OwnedProcess, Receiver<String>) {
 
 #[test]
 fn one_manual_direct_file_two_os_processes_and_unlisted_peer_denied() {
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let fixture_root = std::env::temp_dir().join(format!(
-        "staya-g1f-{}-{nonce}", std::process::id()
-    ));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let fixture_root =
+        std::env::temp_dir().join(format!("staya-g1f-{}-{nonce}", std::process::id()));
     fs::create_dir(&fixture_root).unwrap();
     let file = fixture_root.join("explicit-source.bin");
     let payload: Vec<u8> = (0..(1024 * 1024 + 17))
@@ -104,33 +110,79 @@ fn one_manual_direct_file_two_os_processes_and_unlisted_peer_denied() {
     let (mut unknown, unknown_lines) = new_receiver();
     let unknown_id = next_line(&unknown_lines);
     assert_ne!(unknown_id, format!("PEER_ID {allowed_id}"));
-    unknown.0.stdin.as_mut().unwrap().write_all(invitation.as_bytes()).unwrap();
+    unknown
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(invitation.as_bytes())
+        .unwrap();
     unknown.0.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
     drop(unknown.0.stdin.take());
     let outsider_status = exited(&mut unknown.0);
-    assert!(!outsider_status.success(), "unlisted peer got private Bao content");
+    assert!(
+        !outsider_status.success(),
+        "unlisted peer got private Bao content"
+    );
     assert!(unknown_lines.try_iter().all(|l| !l.starts_with("STAGED ")));
 
     // The single explicitly allowed peer now receives the same object.
-    permitted.0.stdin.as_mut().unwrap().write_all(invitation.as_bytes()).unwrap();
-    permitted.0.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    permitted
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(invitation.as_bytes())
+        .unwrap();
+    permitted
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
     drop(permitted.0.stdin.take());
     let report = next_line(&permitted_lines);
-    assert!(report.starts_with("STAGED "), "receiver did not stage: {report}");
-    assert!(report.contains("NOT_APPLIED=true"), "private preview claimed File Gate authority");
+    assert!(
+        report.starts_with("STAGED "),
+        "receiver did not stage: {report}"
+    );
+    assert!(
+        report.contains("NOT_APPLIED=true"),
+        "private preview claimed File Gate authority"
+    );
     assert!(report.contains(&format!("ROOT={expected_hash}")));
-    let staged_path = report.strip_prefix("STAGED ").unwrap().split(" ROOT=").next().unwrap();
+    let staged_path = report
+        .strip_prefix("STAGED ")
+        .unwrap()
+        .split(" ROOT=")
+        .next()
+        .unwrap();
     let staged = PathBuf::from(staged_path);
-    let staging_root = staged.parent().expect("private staging parent").to_path_buf();
+    let staging_root = staged
+        .parent()
+        .expect("private staging parent")
+        .to_path_buf();
     assert!(staging_root.starts_with(std::env::temp_dir()));
-    assert!(staging_root.file_name().unwrap().to_string_lossy()
-        .starts_with("staya-direct-preview-receiver-"));
+    assert!(
+        staging_root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("staya-direct-preview-receiver-")
+    );
     assert_eq!(fs::read(&staged).unwrap(), payload);
-    assert!(exited(&mut permitted.0).success(), "receiver OS process did not finish");
+    assert!(
+        exited(&mut permitted.0).success(),
+        "receiver OS process did not finish"
+    );
 
     // EOF on the operator's private control pipe closes the provider.
     drop(provider.0.stdin.take());
-    assert!(exited(&mut provider.0).success(), "provider did not exit on session close");
+    assert!(
+        exited(&mut provider.0).success(),
+        "provider did not exit on session close"
+    );
     fs::remove_dir_all(&staging_root).expect("delete only owned random private receiver staging");
     fs::remove_dir_all(&fixture_root).expect("delete only own disposable test source");
 

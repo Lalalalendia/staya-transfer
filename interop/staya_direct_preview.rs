@@ -4,7 +4,9 @@
 //! No secret key is persisted or sent through command-line arguments.
 #![forbid(unsafe_code)]
 
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, endpoint::presets, protocol::Router};
+use iroh::{
+    Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, endpoint::presets, protocol::Router,
+};
 use iroh_blobs::{
     BlobsProtocol, Hash,
     protocol::{ChunkRanges, ChunkRangesExt, GetRequest, Request},
@@ -92,15 +94,23 @@ fn deny_unlisted(allowed: EndpointId, hash: Hash) -> (EventSender, tokio::task::
             match event {
                 ProviderMessage::ClientConnected(e) => {
                     let allowed_peer = e.endpoint_id == Some(allowed);
-                    let _ = e.tx.send(if allowed_peer { Ok(()) } else {
-                        Err(AbortReason::Permission)
-                    }).await;
+                    let _ =
+                        e.tx.send(if allowed_peer {
+                            Ok(())
+                        } else {
+                            Err(AbortReason::Permission)
+                        })
+                        .await;
                 }
                 ProviderMessage::GetRequestReceived(e) => {
                     let allowed_object = e.request.hash == hash && e.request.ranges.is_blob();
-                    let _ = e.tx.send(if allowed_object { Ok(()) } else {
-                        Err(AbortReason::Permission)
-                    }).await;
+                    let _ =
+                        e.tx.send(if allowed_object {
+                            Ok(())
+                        } else {
+                            Err(AbortReason::Permission)
+                        })
+                        .await;
                 }
                 ProviderMessage::ObserveRequestReceived(e) => {
                     let _ = e.tx.send(Err(AbortReason::Permission)).await;
@@ -112,15 +122,24 @@ fn deny_unlisted(allowed: EndpointId, hash: Hash) -> (EventSender, tokio::task::
     (sender, loop_task)
 }
 
-async fn bounded_get(conn: &iroh::endpoint::Connection, hash: Hash, range: std::ops::Range<u64>) -> Result<Vec<u8>, String> {
+async fn bounded_get(
+    conn: &iroh::endpoint::Connection,
+    hash: Hash,
+    range: std::ops::Range<u64>,
+) -> Result<Vec<u8>, String> {
     if range.start >= range.end || range.end - range.start > RANGE {
         return Err("GET exceeds preview 64 KiB per-range limit".into());
     }
     let get = GetRequest::blob_ranges(hash, ChunkRanges::bytes(range));
-    let frame = postcard::to_stdvec(&Request::Get(get))
-        .map_err(|e| format!("GET serialization: {e}"))?;
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| format!("QUIC stream: {e}"))?;
-    send.write_all(&frame).await.map_err(|e| format!("send GET: {e}"))?;
+    let frame =
+        postcard::to_stdvec(&Request::Get(get)).map_err(|e| format!("GET serialization: {e}"))?;
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| format!("QUIC stream: {e}"))?;
+    send.write_all(&frame)
+        .await
+        .map_err(|e| format!("send GET: {e}"))?;
     send.finish().map_err(|e| format!("finish GET: {e}"))?;
     recv.read_to_end(MAX_BAO_PROOF_BYTES.min(4 * 1024 * 1024) + 8)
         .await
@@ -131,7 +150,11 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     // A sender explicitly selects ONE local regular file and ONE allowed peer.
     // No directory enumeration, unsolicited PUSH, GET_MANY or Akula vault.
     let info = fs::symlink_metadata(source).map_err(|e| format!("inspect source: {e}"))?;
-    if !info.is_file() || info.file_type().is_symlink() || info.len() == 0 || info.len() > MAX_OBJECT {
+    if !info.is_file()
+        || info.file_type().is_symlink()
+        || info.len() == 0
+        || info.len() > MAX_OBJECT
+    {
         return Err("source must be a nonempty regular file at most 8 MiB, not a symlink".into());
     }
     let bytes = fs::read(source).map_err(|e| format!("read explicit source: {e}"))?;
@@ -142,8 +165,13 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
         .map_err(|e| format!("invalid explicitly allowed receiver ID: {e}"))?;
     let wanted = Hash::new(&bytes);
     let root = private_root("sender")?;
-    let store = FsStore::load(&root).await.map_err(|e| format!("provider FsStore: {e}"))?;
-    let tag = store.add_slice(&bytes).await.map_err(|e| format!("seed one authorized object: {e}"))?;
+    let store = FsStore::load(&root)
+        .await
+        .map_err(|e| format!("provider FsStore: {e}"))?;
+    let tag = store
+        .add_slice(&bytes)
+        .await
+        .map_err(|e| format!("seed one authorized object: {e}"))?;
     if tag.hash != wanted {
         return Err("provider hash does not equal selected file".into());
     }
@@ -154,8 +182,15 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
         .spawn();
     let ticket = postcard::to_stdvec(&router.endpoint().addr())
         .map_err(|e| format!("serialize direct endpoint: {e}"))?;
-    println!("CONNECT {} {} {}", hex(&ticket), wanted.to_hex(), bytes.len());
-    io::stdout().flush().map_err(|e| format!("announce connect: {e}"))?;
+    println!(
+        "CONNECT {} {} {}",
+        hex(&ticket),
+        wanted.to_hex(),
+        bytes.len()
+    );
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("announce connect: {e}"))?;
 
     // A blocking stdin reader is isolated from Tokio. The sender lives only
     // while its operator keeps the session open; entering any line closes it.
@@ -166,7 +201,10 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     .await
     .map_err(|e| format!("operator session: {e}"))?
     .map_err(|e| format!("operator input: {e}"))?;
-    router.shutdown().await.map_err(|e| format!("provider shutdown: {e}"))?;
+    router
+        .shutdown()
+        .await
+        .map_err(|e| format!("provider shutdown: {e}"))?;
     worker.abort();
     drop(tag);
     drop(store);
@@ -178,11 +216,15 @@ async fn receive() -> Result<(), String> {
     // The receiver key never leaves this process and is never persisted.
     let private_key = SecretKey::generate();
     println!("PEER_ID {}", private_key.public());
-    io::stdout().flush().map_err(|e| format!("announce receiver identity: {e}"))?;
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("announce receiver identity: {e}"))?;
     // Manually transfer the sender's CONNECT line over a trusted out-of-band
     // channel. The sender and root are NOT granted by a network peer inventory.
     let mut input = String::new();
-    io::stdin().read_line(&mut input).map_err(|e| format!("read manual CONNECT: {e}"))?;
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("read manual CONNECT: {e}"))?;
     if input.len() > 8192 {
         return Err("manual CONNECT line exceeded bounded size".into());
     }
@@ -196,11 +238,16 @@ async fn receive() -> Result<(), String> {
         return Err("sender supplied no direct address; relay is disabled".into());
     }
     let trusted_hash = Hash::from_str(fields[2]).map_err(|e| format!("trusted root: {e}"))?;
-    let size = fields[3].parse::<u64>().map_err(|e| format!("object size: {e}"))?;
+    let size = fields[3]
+        .parse::<u64>()
+        .map_err(|e| format!("object size: {e}"))?;
     if size == 0 || size > MAX_OBJECT {
         return Err("object must be nonempty and at most 8 MiB".into());
     }
-    let manifest = Manifest { id: ContentId(*trusted_hash.as_bytes()), size };
+    let manifest = Manifest {
+        id: ContentId(*trusted_hash.as_bytes()),
+        size,
+    };
     let identity = StoreIdentity {
         manifest,
         profile: BaoStorageProfile::IrohBlobs0103PreOrder16KiB,
@@ -213,39 +260,55 @@ async fn receive() -> Result<(), String> {
 
     let root = private_root("receiver")?;
     let owner = StoreLease::acquire(&root).map_err(|e| format!("receiver OS custody: {e}"))?;
-    let actor = FsStore::load(&root).await.map_err(|e| format!("receiver FsStore: {e}"))?;
+    let actor = FsStore::load(&root)
+        .await
+        .map_err(|e| format!("receiver FsStore: {e}"))?;
     let ledger = SharedAdmission::new(Limits {
         max_partial_objects: 1,
         max_reserved_bytes: 4 * 1024 * 1024,
         max_open_handles: 4,
         max_retries_per_object: 0,
-    }).map_err(|e| format!("bounded admission: {e}"))?;
+    })
+    .map_err(|e| format!("bounded admission: {e}"))?;
     let cancelled = AtomicBool::new(false);
 
     let mut start = 0u64;
     while start < size {
         let end = start.saturating_add(RANGE).min(size);
         let range = ByteRange::new(start, end, size).map_err(|e| format!("{e:?}"))?;
-        let response = tokio::time::timeout(
-            STEP_TIMEOUT, bounded_get(&conn, trusted_hash, start..end)
-        ).await.map_err(|_| "bounded QUIC GET timed out")??;
-        if response.len() < 8 || u64::from_le_bytes(response[..8].try_into().map_err(|_| "bad prefix")?) != size {
+        let response =
+            tokio::time::timeout(STEP_TIMEOUT, bounded_get(&conn, trusted_hash, start..end))
+                .await
+                .map_err(|_| "bounded QUIC GET timed out")??;
+        if response.len() < 8
+            || u64::from_le_bytes(response[..8].try_into().map_err(|_| "bad prefix")?) != size
+        {
             return Err("untrusted response size mismatch".into());
         }
-        let request = TransferRequest::new(manifest, range.clone()).map_err(|e| format!("{e:?}"))?;
+        let request =
+            TransferRequest::new(manifest, range.clone()).map_err(|e| format!("{e:?}"))?;
         verify_bao_range(&request, &response[8..])
             .map_err(|e| format!("independent Bao root verification: {e:?}"))?;
         let (_, permit) = partial_adapter::stage_with_inflight_budget(
-            &owner, &ledger, &actor, identity, range, &response, &cancelled
-        ).await?;
+            &owner, &ledger, &actor, identity, range, &response, &cancelled,
+        )
+        .await?;
         drop(permit);
         start = end;
     }
-    ledger.stop_admissions().map_err(|e| format!("stop admissions: {e}"))?;
-    if !ledger.admissions_drained().map_err(|e| format!("drain permits: {e}"))? {
+    ledger
+        .stop_admissions()
+        .map_err(|e| format!("stop admissions: {e}"))?;
+    if !ledger
+        .admissions_drained()
+        .map_err(|e| format!("drain permits: {e}"))?
+    {
         return Err("inflight permit remains after full transfer".into());
     }
-    actor.shutdown().await.map_err(|e| format!("quiesce real FsStore: {e}"))?;
+    actor
+        .shutdown()
+        .await
+        .map_err(|e| format!("quiesce real FsStore: {e}"))?;
     drop(actor);
     // Filesystem readback is independently Bao-authenticated for every group;
     // receiving GET bytes or an FsStore bitmap is not a durable receipt.
@@ -254,27 +317,45 @@ async fn receive() -> Result<(), String> {
     while offset < size {
         let end = offset.saturating_add(RANGE).min(size);
         let range = ByteRange::new(offset, end, size).map_err(|e| format!("{e:?}"))?;
-        audited.extend(partial_adapter::audit_clean_closed_fixture(&root, identity, range)?);
+        audited.extend(partial_adapter::audit_clean_closed_fixture(
+            &root, identity, range,
+        )?);
         offset = end;
     }
     if audited.len() as u64 != size || *blake3::hash(&audited).as_bytes() != manifest.id.0 {
         return Err("cold physical readback did not match the trusted root".into());
     }
-    owner.validate_fence().map_err(|e| format!("final local custody: {e}"))?;
+    owner
+        .validate_fence()
+        .map_err(|e| format!("final local custody: {e}"))?;
 
     // Output is an untrusted private staging *copy*, not an Akula user file
     // and not a File Gate publication. Never accept a peer-supplied filename.
     let staged = root.join("verified-staged.bin");
-    let mut output = OpenOptions::new().write(true).create_new(true)
-        .open(&staged).map_err(|e| format!("new private stage: {e}"))?;
-    output.write_all(&audited).map_err(|e| format!("write private stage: {e}"))?;
-    output.sync_all().map_err(|e| format!("sync private stage: {e}"))?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .map_err(|e| format!("new private stage: {e}"))?;
+    output
+        .write_all(&audited)
+        .map_err(|e| format!("write private stage: {e}"))?;
+    output
+        .sync_all()
+        .map_err(|e| format!("sync private stage: {e}"))?;
     drop(output);
     conn.close(0u8.into(), b"direct preview complete");
     ep.close().await;
     drop(owner);
-    println!("STAGED {} ROOT={} SIZE={} NOT_APPLIED=true", staged.display(), trusted_hash.to_hex(), size);
-    io::stdout().flush().map_err(|e| format!("report verified private staging: {e}"))?;
+    println!(
+        "STAGED {} ROOT={} SIZE={} NOT_APPLIED=true",
+        staged.display(),
+        trusted_hash.to_hex(),
+        size
+    );
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("report verified private staging: {e}"))?;
     Ok(())
 }
 
