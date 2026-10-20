@@ -1,0 +1,41 @@
+name: STY-G2-05h3e Linux native parent-death laboratory
+on:
+  pull_request:
+    paths:
+      - 'native-host/**'
+      - '.github/workflows/g2-native-linux-parent.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'native-host/**'
+      - '.github/workflows/g2-native-linux-parent.yml'
+permissions:
+  contents: read
+concurrency:
+  group: sty-g2-05h3e-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux-native-parent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Check dependency-free native laboratory lock
+        run: cargo metadata --manifest-path native-host/Cargo.toml --locked --format-version 1 > /dev/null
+      - name: Strict Rust format
+        run: cargo fmt --manifest-path native-host/Cargo.toml --all -- --check
+      - name: Real Linux OS hard-kill, pidfd exit and wrong-parent tests
+        run: cargo test --manifest-path native-host/Cargo.toml --locked --all-targets -- --nocapture
+      - name: Strict native syscall lint
+        run: cargo clippy --manifest-path native-host/Cargo.toml --locked --all-targets -- -D warnings
+  rust-191-compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - name: Declared native-host Rust 1.91 MSRV process tests
+        run: cargo test --manifest-path native-host/Cargo.toml --locked --all-targets -- --nocapture
