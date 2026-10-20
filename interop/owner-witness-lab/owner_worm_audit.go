@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -203,6 +204,28 @@ func ObserveYDBAgainstWORM(versions []LockedWORMVersion, owner ed25519.PublicKey
 // It checks bucket versioning, default COMPLIANCE lock, ALL exact-key
 // versions, per-version retention, and exact version payloads.
 // This helper does not deploy a bucket, mint credentials or prove admins differ.
+// Comparing the complete listing metadata before and after per-version reads
+// catches ordinary concurrent S3 mutations. It is only a best-effort TOCTOU
+// check; it cannot authenticate a dishonest S3 list endpoint or prove custody.
+type wormS3VersionList struct {
+	Versions []struct {
+		Key          string
+		VersionId    string
+		IsLatest     bool
+		Size         int64
+		ETag         string
+		LastModified string
+	}
+	DeleteMarkers []struct {
+		Key       string
+		VersionId string
+		IsLatest  bool
+	}
+	IsTruncated         bool
+	NextKeyMarker       string
+	NextVersionIdMarker string
+}
+
 type ReadOnlyObjectLockPreflight struct {
 	Bucket    string
 	Key       string
@@ -248,19 +271,22 @@ func (p ReadOnlyObjectLockPreflight) Read(ctx context.Context) ([]LockedWORMVers
 		lc.ObjectLockConfiguration.Rule.DefaultRetention.Mode != "COMPLIANCE" {
 		return nil, ErrAnchorHold
 	}
-	var listing struct {
-		Versions []struct {
-			Key       string
-			VersionId string
-			IsLatest  bool
-			Size      int64
+	// A single, explicitly bounded S3 API page is deliberate: never allow
+	// the AWS CLI's automatic pagination to conceal a truncated snapshot.
+	// The 129th version is an overflow sentinel; the accepted limit is 128.
+	listVersions := func() (wormS3VersionList, error) {
+		var listing wormS3VersionList
+		data, err := p.query(ctx, 1024*1024, "list-object-versions", "--bucket", p.Bucket,
+			"--prefix", p.Key, "--max-keys", "129", "--no-paginate")
+		if err != nil || json.Unmarshal(data, &listing) != nil || listing.IsTruncated ||
+			listing.NextKeyMarker != "" || listing.NextVersionIdMarker != "" ||
+			len(listing.Versions)+len(listing.DeleteMarkers) > wormMaxVersions {
+			return wormS3VersionList{}, ErrAnchorHold
 		}
-		DeleteMarkers []struct{ Key string }
-		IsTruncated   bool
-		NextToken     string
+		return listing, nil
 	}
-	b, err = p.query(ctx, 1024*1024, "list-object-versions", "--bucket", p.Bucket, "--prefix", p.Key)
-	if err != nil || json.Unmarshal(b, &listing) != nil || listing.IsTruncated || listing.NextToken != "" {
+	listing, err := listVersions()
+	if err != nil {
 		return nil, ErrAnchorHold
 	}
 	for _, marker := range listing.DeleteMarkers {
@@ -307,6 +333,13 @@ func (p ReadOnlyObjectLockPreflight) Read(ctx context.Context) ([]LockedWORMVers
 		out = append(out, LockedWORMVersion{ID: v.VersionId, Latest: v.IsLatest, Mode: retention.Retention.Mode, RetainUntil: until, Payload: content})
 	}
 	if len(out) == 0 {
+		return nil, ErrAnchorHold
+	}
+	// A newly uploaded version, new delete marker, changed IsLatest flag or
+	// altered version metadata during GetObject/GetObjectRetention must HOLD.
+	// No cached or earlier successful listing may stand in for this reread.
+	fresh, err := listVersions()
+	if err != nil || !reflect.DeepEqual(listing, fresh) {
 		return nil, ErrAnchorHold
 	}
 	return out, nil

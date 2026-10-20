@@ -247,7 +247,17 @@ printf '%s\n' "$*" >> "$STY_FAKE_AWS_LOG"
 case "$*" in
 *get-bucket-versioning*) echo '{"Status":"Enabled"}' ;;
 *get-object-lock-configuration*) echo '{"ObjectLockConfiguration":{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Days":300}}}}' ;;
-*list-object-versions*) echo '{"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}' ;;
+*list-object-versions*)
+    if [ "${STY_FAKE_AWS_MUTATE_LISTING:-0}" = 1 ]; then
+      if [ -f "$STY_FAKE_AWS_ROOT/list_seen" ]; then
+        echo '{"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":false,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":true,"Size":440}]}'
+      else
+        : > "$STY_FAKE_AWS_ROOT/list_seen"
+        echo '{"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}'
+      fi
+    else
+      echo '{"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}'
+    fi ;;
 *get-object-retention*) echo '{"Retention":{"Mode":"COMPLIANCE","RetainUntilDate":"2027-08-20T12:00:00Z"}}' ;;
 *get-object*)
     eval "out=\${$#}"
@@ -273,7 +283,16 @@ esac`
 		t.Fatal(err)
 	}
 	commands := string(logBytes)
-	if strings.Contains(commands, "put-object") || strings.Contains(commands, "delete-object") || strings.Contains(commands, "restore") || strings.Count(commands, "get-object ") != 2 {
-		t.Fatalf("unexpected command path: %s", commands)
+	if strings.Contains(commands, "put-object") || strings.Contains(commands, "delete-object") || strings.Contains(commands, "restore") ||
+		strings.Count(commands, "get-object ") != 2 || strings.Count(commands, "list-object-versions") != 2 ||
+		strings.Count(commands, "--no-paginate") != 2 || strings.Count(commands, "--max-keys 129") != 2 {
+		t.Fatalf("unexpected command path or incomplete listing recheck: %s", commands)
+	}
+	// The first S3 listing is valid, but another version becomes current
+	// during per-version body reads. The second listing must catch it.
+	// Without the second ListObjectVersions the stale snapshot would PASS.
+	t.Setenv("STY_FAKE_AWS_MUTATE_LISTING", "1")
+	if err := RunReadOnlyWORMPreflight(ctx, reader, pub, next, now); !errors.Is(err, ErrAnchorHold) {
+		t.Fatalf("concurrent S3 history update was accepted: %v", err)
 	}
 }
