@@ -58,11 +58,23 @@ jobs:
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact clean_reopen_authenticated_range_controls_missing_inventory --nocapture
+      - name: STY-G2-05h2 real FsStore supervised actor shutdown, owner custody and Bao audit
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_supervised_quiescence_blocks_early_handoff_and_reaudits_bao --nocapture
+      - name: STY-G2-05h2 abandoned FsStore actor holds lease until OS process exit
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit --nocapture
       - name: STY-G2-06b second direct QUIC GET omits physically validated ranges
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
           STY_G2_06B_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/resume
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_network_get -- --exact real_second_quic_get_stages_only_unverified_bytes --nocapture
+      - name: STY-G2-05h3a real FsStore OS worker clean join and forced kill
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_os_process_supervisor_clean_and_kill --nocapture
       - name: STY-G2-06c real Linux SIGKILL followed by safe direct QUIC recovery
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
