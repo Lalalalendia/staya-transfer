@@ -43,6 +43,8 @@ jobs:
         run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1
       - name: Native Windows TerminateProcess + real FsStore + Bao restart audit
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_crash_gate -- --exact real_fsstore_kill_reopen_candidate_gate --nocapture
+      - name: G2-05h3b parent TerminateProcess leaves orphaned FsStore worker fail-closed
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_parent_death_fails_closed_without_clean_ack --nocapture
       - name: Strict Windows integration lint
         run: cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --all-targets -- -D warnings
       - name: Windows integration format
