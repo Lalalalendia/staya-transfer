@@ -6,13 +6,7 @@
 //! abort this LAB process instead of dropping memory still owned by the kernel.
 //! No File Gate, production process supervisor or durable acknowledgment.
 
-use std::{
-    ffi::c_void,
-    io,
-    mem::size_of,
-    ptr::null,
-    time::Instant,
-};
+use std::{ffi::c_void, io, mem::size_of, ptr::null, time::Instant};
 
 type RawHandle = *mut c_void;
 const ERROR_IO_PENDING: u32 = 997;
@@ -135,7 +129,11 @@ fn operation(
     };
     assert_eq!(
         size_of::<Overlapped>(),
-        if cfg!(target_pointer_width = "64") { 32 } else { 20 },
+        if cfg!(target_pointer_width = "64") {
+            32
+        } else {
+            20
+        },
         "Win32 OVERLAPPED FFI layout mismatch"
     );
     let mut first_bytes = 0u32;
@@ -171,7 +169,9 @@ fn operation(
             // Do not drop an unobserved outstanding kernel operation even
             // after an unexpected wait failure.
             cancel_and_drain(handle, &mut overlapped, &event);
-            Err(io::Error::other("unexpected overlapped IPC wait state: HOLD"))
+            Err(io::Error::other(
+                "unexpected overlapped IPC wait state: HOLD",
+            ))
         }
     }
 }
@@ -221,15 +221,7 @@ pub fn write_all(handle: RawHandle, mut bytes: &[u8], deadline: Instant) -> io::
         let n = operation(handle, deadline, false, |overlapped, written| {
             // SAFETY: immutable borrowed buffer stays live and unmoved until
             // the kernel returns a completed result or the process aborts.
-            unsafe {
-                WriteFile(
-                    handle,
-                    bytes.as_ptr().cast(),
-                    length,
-                    written,
-                    overlapped,
-                )
-            }
+            unsafe { WriteFile(handle, bytes.as_ptr().cast(), length, written, overlapped) }
         })? as usize;
         if n == 0 || n > bytes.len() {
             return Err(io::Error::new(
