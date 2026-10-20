@@ -1673,6 +1673,7 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
 async fn real_fsstore_registered_child_join_precedes_actor_quiescence() {
     const CHILD_ENV: &str = "STY_G2_05H3D_REGISTERED_CHILD_ROOT";
     const MARKER: &str = ".g2-05h3d-trusted-writer-open";
+    const READY: &str = ".g2-05h3d-trusted-writer-synced";
     const NAME: &str = "real_fsstore_registered_child_join_precedes_actor_quiescence";
 
     if let Some(root) = std::env::var_os(CHILD_ENV) {
@@ -1693,6 +1694,21 @@ async fn real_fsstore_registered_child_join_precedes_actor_quiescence() {
             .expect("test worker opens real writable file handle");
         writable.write_all(b"LAB_WRITER_ARMED").unwrap();
         writable.sync_all().unwrap();
+        // Do not expose readiness merely because create_new() made MARKER
+        // visible. Flush a second writable file, close it, and publish it
+        // by rename so parent sees READY only AFTER real write + fsync.
+        // Windows sync_all() requires the original writable handle.
+        let root = std::path::PathBuf::from(std::env::var_os(CHILD_ENV).unwrap());
+        let pending = root.join(".g2-05h3d-ready-pending");
+        let mut ready = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending)
+            .expect("open writable test readiness");
+        ready.write_all(b"SYNCED_WRITER").unwrap();
+        ready.sync_all().unwrap();
+        drop(ready);
+        fs::rename(pending, root.join(READY)).expect("publish synced child readiness");
         // Keep the writable handle alive. Parent must kill/reap this OS
         // process, not mistake one staged Bao permit for child shutdown.
         let mut ignored = [0u8; 1];
@@ -1750,13 +1766,18 @@ async fn real_fsstore_registered_child_join_precedes_actor_quiescence() {
         );
         active.arm(child_id).expect("arm only the owned child");
         let started = std::time::Instant::now();
-        while !root.join(MARKER).exists() {
+        while !root.join(READY).is_file() {
             assert!(
                 started.elapsed() < Duration::from_secs(15),
-                "registered child did not open and sync writable file"
+                "registered child did not publish post-fsync readiness"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+        assert_eq!(
+            fs::read(root.join(MARKER)).expect("read real child writable file"),
+            b"LAB_WRITER_ARMED",
+            "READY cannot replace the expected real, flushed writer content"
+        );
 
         let closing = active
             .begin_closing()
