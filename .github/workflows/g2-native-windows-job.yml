@@ -1,0 +1,38 @@
+name: STY-G2-05h3f Windows suspended JobObject laboratory
+on:
+  pull_request:
+    paths:
+      - 'native-windows-host/**'
+      - '.github/workflows/g2-native-windows-job.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'native-windows-host/**'
+      - '.github/workflows/g2-native-windows-job.yml'
+permissions:
+  contents: read
+concurrency:
+  group: sty-g2-05h3f-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows-native-job:
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, '1.91.0']
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy, rustfmt
+      - name: Verify dependency-free locked native host manifest
+        run: cargo metadata --manifest-path native-windows-host/Cargo.toml --locked --format-version 1
+      - name: Strict native Windows format
+        run: cargo fmt --manifest-path native-windows-host/Cargo.toml --all -- --check
+      - name: Real native suspended job + TerminateProcess tests
+        run: cargo test --manifest-path native-windows-host/Cargo.toml --locked --all-targets -- --nocapture
+      - name: Strict Windows native syscall lint
+        run: cargo clippy --manifest-path native-windows-host/Cargo.toml --locked --all-targets -- -D warnings
