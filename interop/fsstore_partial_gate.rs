@@ -993,7 +993,6 @@ async fn real_fsstore_os_process_supervisor_clean_and_kill() {
     }
 }
 
-
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn real_fsstore_missing_sidecars_and_corruption_refuse_candidate_reaudit() {
