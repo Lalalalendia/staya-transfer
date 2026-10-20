@@ -45,6 +45,7 @@ jobs:
             'interop/owner-witness-lab/owner_ledger_test.go',
             'docs/ADR-0027-owner-deny-ledger-cas.md',
             '.github/workflows/owner-ledger-cas.yml',
+            '.github/workflows/owner-witness.yml',
           }
           assert actual==expected, ('changed scope',actual^expected)
           assert not any(n.startswith(('src/','custody/','interop/fork/')) for n in actual)
