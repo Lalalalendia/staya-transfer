@@ -90,8 +90,13 @@ fn launcher(root: &Path, armed: bool) -> io::Result<()> {
 fn run() -> io::Result<()> {
     let mut args = env::args_os();
     let _exe = args.next();
-    let mode = args.next().ok_or_else(|| io::Error::other("missing fixture mode"))?;
-    let root = PathBuf::from(args.next().ok_or_else(|| io::Error::other("missing root"))?);
+    let mode = args
+        .next()
+        .ok_or_else(|| io::Error::other("missing fixture mode"))?;
+    let root = PathBuf::from(
+        args.next()
+            .ok_or_else(|| io::Error::other("missing root"))?,
+    );
     if mode == "--worker" {
         let expected = args
             .next()
@@ -105,7 +110,9 @@ fn run() -> io::Result<()> {
         return worker(&root, expected);
     }
     if mode == "--launcher" {
-        let mode = args.next().ok_or_else(|| io::Error::other("missing ARM mode"))?;
+        let mode = args
+            .next()
+            .ok_or_else(|| io::Error::other("missing ARM mode"))?;
         if args.next().is_some() {
             return Err(io::Error::other("unexpected launcher input"));
         }

@@ -53,7 +53,16 @@ pub fn require_parent_death_before_exec(command: &mut Command, expected_parent: 
             // SAFETY: prctl's fixed option and four integer arguments match
             // Linux PR_SET_PDEATHSIG. SIGKILL ends the child on parent-thread
             // death even if it has entered a blocking syscall.
-            if unsafe { prctl(PR_SET_PDEATHSIG, SIGKILL, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) } != 0 {
+            if unsafe {
+                prctl(
+                    PR_SET_PDEATHSIG,
+                    SIGKILL,
+                    0 as c_ulong,
+                    0 as c_ulong,
+                    0 as c_ulong,
+                )
+            } != 0
+            {
                 return Err(io::Error::last_os_error());
             }
             // SAFETY: getppid has no pointer arguments or ownership effects.
@@ -78,8 +87,8 @@ impl PidFd {
             if raw < 0 {
                 return Err(io::Error::last_os_error());
             }
-            let raw = c_int::try_from(raw)
-                .map_err(|_| io::Error::other("pidfd descriptor overflow"))?;
+            let raw =
+                c_int::try_from(raw).map_err(|_| io::Error::other("pidfd descriptor overflow"))?;
             // SAFETY: a successful pidfd_open returned a new owned descriptor.
             return Ok(Self(unsafe { OwnedFd::from_raw_fd(raw) }));
         }
