@@ -72,7 +72,13 @@ jobs:
             'docs/ADR-0031-signed-deny-transition-gateway.md',
             '.github/workflows/owner-signed-deny.yml',
           }
-          assert actual in (expected, expected|anchor_layer, expected|anchor_layer|quorum_layer, expected|anchor_layer|quorum_layer|ydb_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer), (
+          writer_layer={
+            'interop/owner-witness-lab/owner_deny_gateway.go',
+            'interop/owner-witness-lab/owner_deny_gateway_test.go',
+            'docs/ADR-0032-mtls-owner-deny-writer-gateway.md',
+            '.github/workflows/owner-mtls-writer.yml',
+          }
+          assert actual in (expected, expected|anchor_layer, expected|anchor_layer|quorum_layer, expected|anchor_layer|quorum_layer|ydb_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer|writer_layer), (
               'unknown/nonconsecutive lab scope',actual
           )
           assert not any(n.startswith(('src/','custody/','interop/fork/')) for n in actual)
