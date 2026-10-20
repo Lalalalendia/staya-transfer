@@ -3,5 +3,7 @@
 //! The safe Staya custody crate retains #![forbid(unsafe_code)].
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+pub mod ipc;
 #[cfg(not(windows))]
 compile_error!("G2-05h3f is Windows-only; no Linux production claim");

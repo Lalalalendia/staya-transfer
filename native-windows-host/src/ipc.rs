@@ -216,8 +216,8 @@ pub struct PendingPipe {
     handle: Owned,
     name: String,
 }
-pub struct ArmedPipe(Owned);
-pub struct VerifiedParent(Owned);
+pub struct ArmedPipe { _handle: Owned }
+pub struct VerifiedParent { _handle: Owned }
 
 impl PendingPipe {
     pub fn create() -> io::Result<Self> {
@@ -283,7 +283,7 @@ impl PendingPipe {
         if witness.exited(0)? {
             return Err(deny("worker died before nonce ACK"));
         }
-        Ok(ArmedPipe(self.handle))
+        Ok(ArmedPipe { _handle: self.handle })
     }
 }
 
@@ -337,7 +337,7 @@ pub fn receive_parent_arm(pipe_name: &str, expected_parent_pid: u32) -> io::Resu
     if parent_witness.exited(0)? {
         return Err(deny("launcher died immediately after ACK"));
     }
-    Ok(VerifiedParent(handle))
+    Ok(VerifiedParent { _handle: handle })
 }
 
 #[cfg(test)]
