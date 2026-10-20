@@ -81,6 +81,8 @@ jobs:
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_registered_child_join_precedes_actor_quiescence --nocapture
       - name: STY-G2-05h3g native Linux parent death with real pinned FsStore
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_store_worker_gate -- --exact real_fsstore_native_containment_survives_parent_kill --nocapture
+      - name: STY-G2-05h3g2 deny unarmed/wrong-parent/missing-IPC real FsStore
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_store_worker_gate real_fsstore_ipc_denies_ -- --nocapture
       - name: STY-G2-05h3b real parent hard-kill and orphaned FsStore owner
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
