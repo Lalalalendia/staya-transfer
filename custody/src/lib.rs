@@ -10,6 +10,8 @@ pub mod checkpoint;
 
 pub mod partial_barrier;
 
+pub mod child_registry;
+
 use same_file::Handle;
 use std::{
     fs::{self, File, Metadata, OpenOptions},

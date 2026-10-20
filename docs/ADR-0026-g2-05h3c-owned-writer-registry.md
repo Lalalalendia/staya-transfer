@@ -1,0 +1,11 @@
+# ADR-0026 - G2-05h3c owned child-writer registry (LAB ONLY)
+
+Status: Draft. Parent requirement: https://github.com/Lalalalendia/staya-transfer/issues/26. Release gate: https://github.com/Lalalalendia/staya-transfer/issues/23.
+
+This is one independent prerequisite for process supervision, not a production supervisor. The ownership API uses one mutex for registration, ARM and irreversible close. The only start operation spawns the trusted worker inside that mutex and retains a real OS Child handle plus private stdin pipe before allowing ARM. The first-party child fixture blocks before acquiring a real StoreLease, so a second process can own the store pre-ARM. After ARM a competing process sees WouldBlock. Closing kills and positively reaps all registered child handles under a bounded deadline, then a fresh owner reacquires StoreLease. Any timeout or kill failure returns HOLD with registrations retained; no clean release witness exists.
+
+Acceptance on current exact HEAD: cargo test and strict fmt and Clippy in custody on both Windows and Linux. Tests use real OS children and cover before/after ARM, duplicate ARM, capacity, registration/close race, and never-armed kill. No product or installed Akula is changed.
+
+Limits: Command::spawn is not a suspended/OS-contained launch; only a trusted executable that blocks before ARM can satisfy the lab contract. The pipe byte is not authenticated or versioned IPC. Child exit is not real pinned FsStore actor shutdown or verified on-disk Bao, and does not authorize any journal checkpoint or missing-range skip. No Linux parent-death primitive, Windows Job Object, owned FsStore actor, inherited FD prevention, path swap hardening, actor cancellation, power-loss claim, or durable device/Vault grant exists here. Drop is best-effort kill and not clean-reap evidence. Production File Gate Akula and STY-G2 remain HOLD.
+
+Next: mount this registry under one trusted host process, require OS process containment before ARM, atomically close writer registration with the FsStore actor's admission, boundedly join all children and real actor shutdown, and only then generate a private quiescence witness after physical root revalidation. Never import this module into Akula File Gate as approval.
