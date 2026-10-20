@@ -1,0 +1,73 @@
+name: STY owner signed DENY-only transition gate lab
+
+on:
+  push:
+    branches: ["experiment/sty-online-owner-signed-deny-*"]
+  pull_request:
+    paths:
+      - "interop/owner-witness-lab/owner_signed_transition.go"
+      - "interop/owner-witness-lab/owner_signed_transition_test.go"
+      - "docs/ADR-0031-signed-deny-transition-gateway.md"
+      - ".github/workflows/owner-signed-deny.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  signed-deny-gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: Strict signed-DENY-only research scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          base='96317cb372851e8814b18b86ac06e2e99b60d008'
+          actual=set(subprocess.check_output(['git','diff','--name-only',base+'..HEAD'],text=True).splitlines())
+          expected={
+              'interop/owner-witness-lab/owner_signed_transition.go',
+              'interop/owner-witness-lab/owner_signed_transition_test.go',
+              'docs/ADR-0031-signed-deny-transition-gateway.md',
+              '.github/workflows/owner-signed-deny.yml',
+              '.github/workflows/owner-witness.yml',
+              '.github/workflows/owner-ledger-cas.yml',
+              '.github/workflows/owner-anchor-gate.yml',
+              '.github/workflows/owner-remote-quorum.yml',
+              '.github/workflows/owner-ydb-cas.yml',
+          }
+          assert actual == expected, ('non-research file or incomplete gate layer',actual^expected)
+          assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in actual)
+          PY
+          git diff --check
+      - name: Signed owner-transition, actual HTTPS CAS and rollback falsifiers
+        working-directory: interop/owner-witness-lab
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 ./...
+          go vet ./...
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            test -z "$(gofmt -l .)"
+            go test -race -count=1 ./...
+          fi
+      - name: Mandatory release HOLD
+        shell: bash
+        run: |
+          echo 'Signed DENY-only transition is NOT an independently deployed writer or nonrollbackable audit.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'An editor credential and privileged DB restore can bypass or replay this laboratory gate.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No full grants policy, Akula File Gate, P2P write, APPLIED or ACK.' >> "$GITHUB_STEP_SUMMARY"

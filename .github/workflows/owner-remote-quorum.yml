@@ -55,7 +55,13 @@ jobs:
             'docs/ADR-0030-ydb-document-denial-cas.md',
             '.github/workflows/owner-ydb-cas.yml',
           }
-          assert changes in (expected, expected|ydb_layer), ('forbidden path or incomplete YDB research layer',changes)
+          signed_layer={
+            'interop/owner-witness-lab/owner_signed_transition.go',
+            'interop/owner-witness-lab/owner_signed_transition_test.go',
+            'docs/ADR-0031-signed-deny-transition-gateway.md',
+            '.github/workflows/owner-signed-deny.yml',
+          }
+          assert changes in (expected, expected|ydb_layer, expected|ydb_layer|signed_layer), ('forbidden path or incomplete YDB research layer',changes)
           assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in changes)
           PY
           git diff --check
