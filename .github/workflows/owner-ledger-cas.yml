@@ -53,7 +53,14 @@ jobs:
             'docs/ADR-0028-owner-anchor-commit-order.md',
             '.github/workflows/owner-anchor-gate.yml',
           }
-          assert actual in (expected, expected|anchor_layer), (
+          quorum_layer = {
+            'interop/owner-witness-lab/witness.go',
+            'interop/owner-witness-lab/owner_remote_quorum.go',
+            'interop/owner-witness-lab/owner_remote_quorum_test.go',
+            '.github/workflows/owner-remote-quorum.yml',
+            'docs/ADR-0029-two-remote-denial-witnesses.md',
+          }
+          assert actual in (expected, expected|anchor_layer, expected|anchor_layer|quorum_layer), (
               'unknown/nonconsecutive lab scope',actual
           )
           assert not any(n.startswith(('src/','custody/','interop/fork/')) for n in actual)

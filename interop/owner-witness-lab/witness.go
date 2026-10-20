@@ -201,12 +201,13 @@ func NewClient(roots *x509.CertPool, clientCert tls.Certificate, serverSPKIPin [
 	}}
 	return &Client{http: &http.Client{Transport: transport, Timeout: 3 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect prohibited") }},
-		signingKey: append(ed25519.PublicKey(nil), ownerSignKey...)}, nil
+		signingKey: append(ed25519.PublicKey(nil), ownerSignKey...), tlsPin: serverSPKIPin}, nil
 }
 
 type Client struct {
 	http       *http.Client
 	signingKey ed25519.PublicKey
+	tlsPin     [32]byte
 }
 type Verdict string
 
@@ -219,42 +220,61 @@ const (
 	ConsistentDenialSnapshotOnly Verdict = "CONSISTENT_DENIAL_ONLY"
 )
 
-// Inspect does not return a grant even if local bytes and remote head match.
-// The caller must not cache an earlier successful result as authorization.
-func (c *Client) Inspect(ctx context.Context, url string, local Head) Verdict {
-	if c == nil || c.http == nil || !validHead(local) {
-		return HoldInvalidWitness
+// FetchHead returns a fresh, authenticated DENY-only remote snapshot; no cache,
+// mutation or positive authorization is exposed. The caller MUST still compare
+// the complete remote checkpoint with its local journal under the OS lock.
+// A successful result is only a signed denial snapshot, not a grant.
+func (c *Client) FetchHead(ctx context.Context, url string, installation, vault [16]byte) (Head, Verdict) {
+	if c == nil || c.http == nil || ctx == nil || ctx.Err() != nil ||
+		installation == [16]byte{} || vault == [16]byte{} {
+		return Head{}, HoldInvalidWitness
 	}
 	var nonce [32]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
-		return HoldUnavailable
+		return Head{}, HoldUnavailable
 	}
-	request, _ := json.Marshal(headRequest{
-		Installation: hex.EncodeToString(local.Installation[:]),
-		Vault:        hex.EncodeToString(local.Vault[:]), Nonce: nonce[:],
+	request, err := json.Marshal(headRequest{
+		Installation: hex.EncodeToString(installation[:]),
+		Vault:        hex.EncodeToString(vault[:]), Nonce: nonce[:],
 	})
+	if err != nil {
+		return Head{}, HoldUnavailable
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url+"/v1/head", bytes.NewReader(request))
 	if err != nil {
-		return HoldUnavailable
+		return Head{}, HoldUnavailable
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := c.http.Do(req)
 	if err != nil {
-		return HoldUnavailable
+		return Head{}, HoldUnavailable
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return HoldUnavailable
+		return Head{}, HoldUnavailable
 	}
 	var signed signedHead
 	if readExactlyJSON(res.Body, &signed) != nil || len(signed.Signature) != ed25519.SignatureSize ||
 		!ed25519.Verify(c.signingKey, signed.Payload, signed.Signature) {
-		return HoldInvalidWitness
+		return Head{}, HoldInvalidWitness
 	}
 	remote, gotNonce, err := decode(signed.Payload)
 	if err != nil || subtle.ConstantTimeCompare(gotNonce[:], nonce[:]) != 1 ||
-		remote.Installation != local.Installation || remote.Vault != local.Vault {
+		remote.Installation != installation || remote.Vault != vault {
+		return Head{}, HoldInvalidWitness
+	}
+	return remote, ConsistentDenialSnapshotOnly
+}
+
+// Inspect does not return a grant even if local bytes and remote head match.
+// The caller must not cache an earlier successful result as authorization.
+func (c *Client) Inspect(ctx context.Context, url string, local Head) Verdict {
+	if !validHead(local) {
 		return HoldInvalidWitness
+	}
+	remote, verdict := c.FetchHead(ctx, url, local.Installation, local.Vault)
+	if verdict != ConsistentDenialSnapshotOnly {
+		return verdict
 	}
 	if local.Epoch < remote.Epoch {
 		return HoldJournalBehind
