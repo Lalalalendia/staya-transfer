@@ -1,0 +1,70 @@
+name: STY owner anchor checkpoint fail-closed lab
+
+on:
+  push:
+    branches: ["experiment/sty-online-owner-anchor-*"]
+  pull_request:
+    paths:
+      - "interop/owner-witness-lab/**"
+      - "docs/ADR-0028-owner-anchor-commit-order.md"
+      - ".github/workflows/owner-anchor-gate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  denial-checkpoint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: Strict bounded diff from owner journal parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          base='aa2d4d1470d4dc896d27fb63bb22192d9bdbfa01'
+          actual=set(subprocess.check_output(['git','diff','--name-only',base+'..HEAD'],text=True).splitlines())
+          expected={
+            'interop/owner-witness-lab/owner_ledger.go',
+            'interop/owner-witness-lab/owner_anchor_gate.go',
+            'interop/owner-witness-lab/owner_anchor_gate_test.go',
+            '.github/workflows/owner-witness.yml',
+            '.github/workflows/owner-ledger-cas.yml',
+            '.github/workflows/owner-anchor-gate.yml',
+            'docs/ADR-0028-owner-anchor-commit-order.md',
+          }
+          assert actual==expected, ('out of lab scope', actual^expected)
+          assert not any(n.startswith(('src/','custody/','interop/fork/')) for n in actual)
+          PY
+          git diff --check
+      - name: DENY checkpoint, TLS, CAS crash boundary tests
+        working-directory: interop/owner-witness-lab
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 ./...
+          go vet ./...
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            test -z "$(gofmt -l .)"
+            go test -race -count=1 ./...
+          fi
+      - name: Mandatory research-only and fail-closed summary
+        shell: bash
+        run: |
+          echo 'Only an in-memory test double implements the external anchor interface.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Ledger vs anchor divergence, offline root and ambiguous seal result require HOLD.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No real rollback-resistant anchor, full positive policy root, P2P grants, File Gate, APPLIED or ACK.' >> "$GITHUB_STEP_SUMMARY"

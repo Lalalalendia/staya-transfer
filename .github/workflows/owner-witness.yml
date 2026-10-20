@@ -37,7 +37,7 @@ jobs:
           python3 - <<'PY'
           import subprocess
           names=subprocess.check_output(['git','diff','--name-only','origin/main...HEAD'],text=True).splitlines()
-          allowed=('.github/workflows/owner-witness.yml', '.github/workflows/owner-ledger-cas.yml', 'docs/ADR-0026-owner-online-witness.md', 'docs/ADR-0027-owner-deny-ledger-cas.md')
+          allowed=('.github/workflows/owner-witness.yml', '.github/workflows/owner-ledger-cas.yml', '.github/workflows/owner-anchor-gate.yml', 'docs/ADR-0026-owner-online-witness.md', 'docs/ADR-0027-owner-deny-ledger-cas.md', 'docs/ADR-0028-owner-anchor-commit-order.md')
           assert names and all(n in allowed or n.startswith('interop/owner-witness-lab/') for n in names), names
           PY
           git diff --check
@@ -47,9 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           go test -count=1 ./...
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            test -z "$(gofmt -l .)"
-          fi
+          test -z "$(gofmt -l .)"
       - name: Explicit release HOLD
         shell: bash
         run: |
