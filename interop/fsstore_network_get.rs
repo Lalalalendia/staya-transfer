@@ -508,11 +508,12 @@ async fn real_second_quic_get_stages_only_unverified_bytes() {
     .expect("bounded G2-06b network partial-resume fixture");
 }
 
-
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn linux_killed_receiver_redownloads_uncommitted_or_resumes_verified() {
-    use partial_adapter::{audit_clean_closed_fixture, stage_with_inflight_budget, stage_verified_fixture};
+    use partial_adapter::{
+        audit_clean_closed_fixture, stage_verified_fixture, stage_with_inflight_budget,
+    };
     use staya_custody_lab::{
         StoreLease,
         admission::{Limits, SharedAdmission},
@@ -576,7 +577,13 @@ async fn linux_killed_receiver_redownloads_uncommitted_or_resumes_verified() {
         let cancelled = AtomicBool::new(false);
         let actor = FsStore::load(&dir).await.expect("pinned FsStore in child");
         let (_uncommitted, permit) = stage_with_inflight_budget(
-            &owner, &quota, &actor, identity, interval.clone(), &wire, &cancelled,
+            &owner,
+            &quota,
+            &actor,
+            identity,
+            interval.clone(),
+            &wire,
+            &cancelled,
         )
         .await
         .expect("verified first actual QUIC proof imported");
@@ -594,8 +601,8 @@ async fn linux_killed_receiver_redownloads_uncommitted_or_resumes_verified() {
                 end: FIRST_END,
             };
             publish_after_quiescent_audit(&owner, claim, |_| {
-                let bytes =
-                    audit_clean_closed_fixture(&dir, identity, interval).map_err(io::Error::other)?;
+                let bytes = audit_clean_closed_fixture(&dir, identity, interval)
+                    .map_err(io::Error::other)?;
                 if bytes != data[FIRST_START as usize..FIRST_END as usize] {
                     return Err(io::Error::other("physical Bao readback mismatch"));
                 }
