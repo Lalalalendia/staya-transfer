@@ -3,12 +3,12 @@
 
 use crate::windows::ProcessWatcher;
 use std::{
-    ffi::{c_void, OsStr},
+    ffi::{OsStr, c_void},
     fmt::Write as _,
     io,
     mem::size_of,
     os::windows::ffi::OsStrExt,
-    ptr::{null_mut},
+    ptr::null_mut,
 };
 
 type Handle = *mut c_void;
@@ -36,28 +36,68 @@ struct SecurityAttributes {
     descriptor: Handle,
     inherit: i32,
 }
-#[link(name="kernel32")]
+#[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetCurrentProcess() -> Handle;
     fn GetLastError() -> u32;
     fn LocalFree(value: Handle) -> Handle;
     fn CloseHandle(value: Handle) -> i32;
-    fn CreateNamedPipeW(name: *const u16, mode: u32, pipe_mode: u32, max: u32, out_size: u32, in_size: u32, default_timeout: u32, security: *const SecurityAttributes) -> Handle;
+    fn CreateNamedPipeW(
+        name: *const u16,
+        mode: u32,
+        pipe_mode: u32,
+        max: u32,
+        out_size: u32,
+        in_size: u32,
+        default_timeout: u32,
+        security: *const SecurityAttributes,
+    ) -> Handle;
     fn ConnectNamedPipe(pipe: Handle, overlapped: Handle) -> i32;
     fn GetNamedPipeClientProcessId(pipe: Handle, pid: *mut u32) -> i32;
     fn GetNamedPipeServerProcessId(pipe: Handle, pid: *mut u32) -> i32;
-    fn CreateFileW(name: *const u16, access: u32, share: u32, security: Handle, creation: u32, flags: u32, template: Handle) -> Handle;
-    fn ReadFile(handle: Handle, buffer: Handle, len: u32, actual: *mut u32, overlapped: Handle) -> i32;
-    fn WriteFile(handle: Handle, buffer: *const c_void, len: u32, actual: *mut u32, overlapped: Handle) -> i32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        security: Handle,
+        creation: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
+    fn ReadFile(
+        handle: Handle,
+        buffer: Handle,
+        len: u32,
+        actual: *mut u32,
+        overlapped: Handle,
+    ) -> i32;
+    fn WriteFile(
+        handle: Handle,
+        buffer: *const c_void,
+        len: u32,
+        actual: *mut u32,
+        overlapped: Handle,
+    ) -> i32;
 }
-#[link(name="advapi32")]
+#[link(name = "advapi32")]
 unsafe extern "system" {
     fn OpenProcessToken(process: Handle, desired: u32, token: *mut Handle) -> i32;
-    fn GetTokenInformation(token: Handle, class: u32, output: Handle, max: u32, actual: *mut u32) -> i32;
+    fn GetTokenInformation(
+        token: Handle,
+        class: u32,
+        output: Handle,
+        max: u32,
+        actual: *mut u32,
+    ) -> i32;
     fn ConvertSidToStringSidW(sid: Handle, wide_sid: *mut *mut u16) -> i32;
-    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl: *const u16, revision: u32, descriptor: *mut Handle, size: *mut u32) -> i32;
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl: *const u16,
+        revision: u32,
+        descriptor: *mut Handle,
+        size: *mut u32,
+    ) -> i32;
 }
-#[link(name="bcrypt")]
+#[link(name = "bcrypt")]
 unsafe extern "system" {
     fn BCryptGenRandom(algorithm: Handle, buffer: *mut u8, len: u32, flags: u32) -> i32;
 }
@@ -71,9 +111,18 @@ fn wide(text: &str) -> Vec<u16> {
 fn random(bytes: &mut [u8]) -> io::Result<()> {
     let length = u32::try_from(bytes.len()).map_err(|_| deny("random buffer oversized"))?;
     // SAFETY: live writable buffer of precisely length bytes.
-    let status = unsafe { BCryptGenRandom(null_mut(), bytes.as_mut_ptr(), length, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    let status = unsafe {
+        BCryptGenRandom(
+            null_mut(),
+            bytes.as_mut_ptr(),
+            length,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
     if status != 0 {
-        return Err(io::Error::other(format!("BCryptGenRandom NTSTATUS {status:#x}")));
+        return Err(io::Error::other(format!(
+            "BCryptGenRandom NTSTATUS {status:#x}"
+        )));
     }
     Ok(())
 }
@@ -118,7 +167,16 @@ fn process_user_sid() -> io::Result<String> {
     let mut bytes = vec![0u8; needed as usize];
     let mut actual = 0;
     // SAFETY: returned TokenUser structure stored in the allocated buffer.
-    if unsafe { GetTokenInformation(token.0, TOKEN_USER, bytes.as_mut_ptr().cast(), needed, &mut actual) } == 0 {
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TOKEN_USER,
+            bytes.as_mut_ptr().cast(),
+            needed,
+            &mut actual,
+        )
+    } == 0
+    {
         return Err(io::Error::last_os_error());
     }
     if actual < size_of::<Handle>() as u32 {
@@ -136,12 +194,17 @@ fn process_user_sid() -> io::Result<String> {
         return Err(io::Error::last_os_error());
     }
     let _release = Local(sid_text.cast());
-    let length = (0..256).position(|i| unsafe { *sid_text.add(i) == 0 })
+    let length = (0..256)
+        .position(|i| unsafe { *sid_text.add(i) == 0 })
         .ok_or_else(|| deny("SID string exceeded 255 UTF16 code units"))?;
     // SAFETY: NUL-terminated Windows text held alive by Local wrapper.
     let result = String::from_utf16(unsafe { std::slice::from_raw_parts(sid_text, length) })
         .map_err(|_| deny("invalid Windows SID UTF16"))?;
-    if !result.starts_with("S-1-") || !result.chars().all(|ch| ch == 'S' || ch == '-' || ch.is_ascii_digit()) {
+    if !result.starts_with("S-1-")
+        || !result
+            .chars()
+            .all(|ch| ch == 'S' || ch == '-' || ch.is_ascii_digit())
+    {
         return Err(deny("invalid canonical process SID"));
     }
     Ok(result)
@@ -153,7 +216,10 @@ fn restricted_descriptor() -> io::Result<Local> {
     let sddl = wide(&format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})"));
     let mut out = null_mut();
     // SAFETY: valid NUL-terminated SDDL, revision 1 and writable descriptor.
-    if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut out, null_mut()) } == 0 {
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut out, null_mut())
+    } == 0
+    {
         return Err(io::Error::last_os_error());
     }
     if out.is_null() {
@@ -185,7 +251,16 @@ fn write_frame(handle: Handle, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
         let mut n = 0;
         // SAFETY: synchronous Win32 call and writable length output.
-        if unsafe { WriteFile(handle, bytes.as_ptr().cast(), bytes.len() as u32, &mut n, null_mut()) } == 0 {
+        if unsafe {
+            WriteFile(
+                handle,
+                bytes.as_ptr().cast(),
+                bytes.len() as u32,
+                &mut n,
+                null_mut(),
+            )
+        } == 0
+        {
             return Err(io::Error::last_os_error());
         }
         if n == 0 {
@@ -199,11 +274,23 @@ fn read_frame(handle: Handle, mut bytes: &mut [u8]) -> io::Result<()> {
     while !bytes.is_empty() {
         let mut n = 0;
         // SAFETY: synchronous Win32 call and writable buffers.
-        if unsafe { ReadFile(handle, bytes.as_mut_ptr().cast(), bytes.len() as u32, &mut n, null_mut()) } == 0 {
+        if unsafe {
+            ReadFile(
+                handle,
+                bytes.as_mut_ptr().cast(),
+                bytes.len() as u32,
+                &mut n,
+                null_mut(),
+            )
+        } == 0
+        {
             return Err(io::Error::last_os_error());
         }
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short IPC frame"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "short IPC frame",
+            ));
         }
         let (_, remainder) = bytes.split_at_mut(n as usize);
         bytes = remainder;
@@ -216,8 +303,12 @@ pub struct PendingPipe {
     handle: Owned,
     name: String,
 }
-pub struct ArmedPipe { _handle: Owned }
-pub struct VerifiedParent { _handle: Owned }
+pub struct ArmedPipe {
+    _handle: Owned,
+}
+pub struct VerifiedParent {
+    _handle: Owned,
+}
 
 impl PendingPipe {
     pub fn create() -> io::Result<Self> {
@@ -248,7 +339,10 @@ impl PendingPipe {
                 &attributes,
             )
         };
-        Ok(Self { handle: Owned::new(raw)?, name })
+        Ok(Self {
+            handle: Owned::new(raw)?,
+            name,
+        })
     }
     pub fn name(&self) -> &str {
         &self.name
@@ -283,7 +377,9 @@ impl PendingPipe {
         if witness.exited(0)? {
             return Err(deny("worker died before nonce ACK"));
         }
-        Ok(ArmedPipe { _handle: self.handle })
+        Ok(ArmedPipe {
+            _handle: self.handle,
+        })
     }
 }
 
@@ -363,6 +459,11 @@ mod tests {
     fn explicit_user_sid_dacl_and_unique_local_pipe() {
         assert!(process_user_sid().unwrap().starts_with("S-1-"));
         let _security = restricted_descriptor().unwrap();
-        assert!(PendingPipe::create().unwrap().name().starts_with(r"\\.\pipe\staya-g2-05h3g3-"));
+        assert!(
+            PendingPipe::create()
+                .unwrap()
+                .name()
+                .starts_with(r"\\.\pipe\staya-g2-05h3g3-")
+        );
     }
 }
