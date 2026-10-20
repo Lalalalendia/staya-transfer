@@ -51,9 +51,13 @@ fn exited(child: &mut Child) -> ExitStatus {
     }
 }
 
-fn new_receiver() -> (OwnedProcess, Receiver<String>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"))
-        .arg("receive")
+fn new_receiver(lab_drop: bool) -> (OwnedProcess, Receiver<String>) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"));
+    command.arg("receive");
+    if lab_drop {
+        command.arg("--lab-drop-after-first-range");
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -65,6 +69,15 @@ fn new_receiver() -> (OwnedProcess, Receiver<String>) {
 
 #[test]
 fn one_manual_direct_file_two_os_processes_and_unlisted_peer_denied() {
+    run_manual_preview(false);
+}
+
+#[test]
+fn manual_preview_reconnects_real_quic_after_forced_close() {
+    run_manual_preview(true);
+}
+
+fn run_manual_preview(lab_drop: bool) {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -79,7 +92,7 @@ fn one_manual_direct_file_two_os_processes_and_unlisted_peer_denied() {
     fs::write(&file, &payload).unwrap();
     let expected_hash = blake3::hash(&payload).to_hex().to_string();
 
-    let (mut permitted, permitted_lines) = new_receiver();
+    let (mut permitted, permitted_lines) = new_receiver(lab_drop);
     let allowed_id = next_line(&permitted_lines)
         .strip_prefix("PEER_ID ")
         .expect("bounded manually authorized receiver identifier")
@@ -107,7 +120,7 @@ fn one_manual_direct_file_two_os_processes_and_unlisted_peer_denied() {
 
     // Unknown peer really connects to the same running Iroh provider. Its
     // certificate identity must be rejected before any object can be staged.
-    let (mut unknown, unknown_lines) = new_receiver();
+    let (mut unknown, unknown_lines) = new_receiver(false);
     let unknown_id = next_line(&unknown_lines);
     assert_ne!(unknown_id, format!("PEER_ID {allowed_id}"));
     unknown
@@ -152,6 +165,10 @@ fn one_manual_direct_file_two_os_processes_and_unlisted_peer_denied() {
         "private preview claimed File Gate authority"
     );
     assert!(report.contains(&format!("ROOT={expected_hash}")));
+    assert!(
+        report.contains(&format!("RECONNECTS={}", if lab_drop { 1 } else { 0 })),
+        "real QUIC reconnect was not observed or was unexpectedly retried: {report}"
+    );
     let staged_path = report
         .strip_prefix("STAGED ")
         .unwrap()
@@ -195,7 +212,7 @@ fn one_manual_direct_file_two_os_processes_and_unlisted_peer_denied() {
     fs::remove_dir_all(&staging_root).expect("delete only owned random private receiver staging");
     fs::remove_dir_all(&fixture_root).expect("delete only own disposable test source");
 
-    if let Some(out) = std::env::var_os("STY_G1F_OUTPUT_DIR") {
+    if !lab_drop && let Some(out) = std::env::var_os("STY_G1F_OUTPUT_DIR") {
         let dir = PathBuf::from(out);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("inventory.txt"), format!(
@@ -205,6 +222,6 @@ fn one_manual_direct_file_two_os_processes_and_unlisted_peer_denied() {
         fs::write(dir.join("received.bin"), &payload).unwrap();
     }
     println!(
-        "STY_G1F separate_sender_receiver=true QUIC=true root_verified=true unauthorized_denied=true staging_only=true"
+        "STY_G1F separate_sender_receiver=true QUIC=true root_verified=true unauthorized_denied=true staging_only=true forced_reconnect={lab_drop}"
     );
 }

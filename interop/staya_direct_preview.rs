@@ -40,6 +40,8 @@ mod partial_adapter;
 const MAX_OBJECT: u64 = 8 * 1024 * 1024;
 const RANGE: u64 = 64 * 1024;
 const STEP_TIMEOUT: Duration = Duration::from_secs(20);
+// Global session budget: a broken peer cannot cause unbounded network retries.
+const MAX_SESSION_RECONNECTS: u8 = 2;
 
 fn hex(bytes: &[u8]) -> String {
     let mut encoded = String::with_capacity(bytes.len() * 2);
@@ -172,6 +174,45 @@ async fn bounded_get(
         .map_err(|e| format!("bounded Bao response: {e}"))
 }
 
+/// Retry exactly the same still-unverified range after a failed QUIC GET.
+/// Reconnect uses the ORIGINAL pinned endpoint ticket and local ephemeral key.
+/// A successful GET is not trusted until the caller independently verifies Bao.
+async fn bounded_get_with_reconnect(
+    endpoint: &Endpoint,
+    address: &EndpointAddr,
+    connection: &mut iroh::endpoint::Connection,
+    hash: Hash,
+    range: std::ops::Range<u64>,
+    reconnects: &mut u8,
+) -> Result<Vec<u8>, String> {
+    loop {
+        let failure =
+            match tokio::time::timeout(STEP_TIMEOUT, bounded_get(connection, hash, range.clone()))
+                .await
+            {
+                Ok(Ok(response)) => return Ok(response),
+                Ok(Err(err)) => err,
+                Err(_) => "bounded QUIC GET timed out".to_owned(),
+            };
+        if *reconnects >= MAX_SESSION_RECONNECTS {
+            return Err(format!(
+                "QUIC retry budget exhausted on unverified range: {failure}"
+            ));
+        }
+        connection.close(0u8.into(), b"retry exact unverified range");
+        // No fallback to relay, no replacement object/root/peer from the network.
+        *connection = tokio::time::timeout(
+            STEP_TIMEOUT,
+            endpoint.connect(address.clone(), iroh_blobs::ALPN),
+        )
+        .await
+        .map_err(|_| "bounded direct QUIC reconnect timed out")?
+        .map_err(|err| format!("bounded direct QUIC reconnect rejected: {err}"))?;
+        *reconnects += 1;
+        eprintln!("STY_G1I_QUIC_RECONNECTED count={reconnects}");
+    }
+}
+
 async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     // A sender explicitly selects ONE local regular file and ONE allowed peer.
     // No directory enumeration, unsolicited PUSH, GET_MANY or Akula vault.
@@ -238,7 +279,7 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn receive() -> Result<(), String> {
+async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
     // The receiver key never leaves this process and is never persisted.
     let private_key = SecretKey::generate();
     println!("PEER_ID {}", private_key.public());
@@ -270,6 +311,9 @@ async fn receive() -> Result<(), String> {
     if size == 0 || size > MAX_OBJECT {
         return Err("object must be nonempty and at most 8 MiB".into());
     }
+    if lab_drop_after_first_range && size <= RANGE {
+        return Err("lab reconnect requires at least two Bao ranges".into());
+    }
     let manifest = Manifest {
         id: ContentId(*trusted_hash.as_bytes()),
         size,
@@ -279,10 +323,11 @@ async fn receive() -> Result<(), String> {
         profile: BaoStorageProfile::IrohBlobs0103PreOrder16KiB,
     };
     let ep = endpoint(private_key).await?;
-    let conn = tokio::time::timeout(STEP_TIMEOUT, ep.connect(address, iroh_blobs::ALPN))
-        .await
-        .map_err(|_| "direct QUIC connection timed out")?
-        .map_err(|e| format!("direct QUIC connection: {e}"))?;
+    let mut conn =
+        tokio::time::timeout(STEP_TIMEOUT, ep.connect(address.clone(), iroh_blobs::ALPN))
+            .await
+            .map_err(|_| "direct QUIC connection timed out")?
+            .map_err(|e| format!("direct QUIC connection: {e}"))?;
 
     let root = private_root("receiver")?;
     let owner = StoreLease::acquire(&root).map_err(|e| format!("receiver OS custody: {e}"))?;
@@ -299,13 +344,19 @@ async fn receive() -> Result<(), String> {
     let cancelled = AtomicBool::new(false);
 
     let mut start = 0u64;
+    let mut reconnects = 0u8;
     while start < size {
         let end = start.saturating_add(RANGE).min(size);
         let range = ByteRange::new(start, end, size).map_err(|e| format!("{e:?}"))?;
-        let response =
-            tokio::time::timeout(STEP_TIMEOUT, bounded_get(&conn, trusted_hash, start..end))
-                .await
-                .map_err(|_| "bounded QUIC GET timed out")??;
+        let response = bounded_get_with_reconnect(
+            &ep,
+            &address,
+            &mut conn,
+            trusted_hash,
+            start..end,
+            &mut reconnects,
+        )
+        .await?;
         if response.len() < 8
             || u64::from_le_bytes(response[..8].try_into().map_err(|_| "bad prefix")?) != size
         {
@@ -320,6 +371,11 @@ async fn receive() -> Result<(), String> {
         )
         .await?;
         drop(permit);
+        if lab_drop_after_first_range && start == 0 {
+            // Real QUIC close, not a mocked transport failure. The next GET
+            // must reconnect with the same authenticated ephemeral identity.
+            conn.close(0u8.into(), b"lab abrupt QUIC interruption");
+        }
         start = end;
     }
     ledger
@@ -374,10 +430,11 @@ async fn receive() -> Result<(), String> {
     ep.close().await;
     drop(owner);
     println!(
-        "STAGED {} ROOT={} SIZE={} NOT_APPLIED=true",
+        "STAGED {} ROOT={} SIZE={} RECONNECTS={} NOT_APPLIED=true",
         staged.display(),
         trusted_hash.to_hex(),
-        size
+        size,
+        reconnects
     );
     io::stdout()
         .flush()
@@ -397,8 +454,16 @@ async fn main() -> Result<(), String> {
             serve(Path::new(&source), &peer).await
         }
         "receive" => {
-            if args.next().is_some() { return Err("receive takes no arguments".into()); }
-            receive().await
+            // Explicit non-production fault injection; normal use needs no flag.
+            let lab_drop = match args.next().as_deref() {
+                None => false,
+                Some("--lab-drop-after-first-range") => true,
+                Some(_) => return Err("unknown receive option".into()),
+            };
+            if args.next().is_some() {
+                return Err("unexpected receive argument".into());
+            }
+            receive(lab_drop).await
         }
         _ => Err("usage: staya-direct-preview receive | serve <file> <receiver-id>; manual direct-only private staging".into())
     }

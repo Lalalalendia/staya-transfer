@@ -148,6 +148,8 @@ jobs:
         env:
           STY_G1F_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/direct-preview
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_manual_direct_file_two_os_processes_and_unlisted_peer_denied --nocapture
+      - name: STY-G1i real QUIC reconnect after forced break, Bao re-audit
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact manual_preview_reconnects_real_quic_after_forced_close --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
