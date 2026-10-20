@@ -75,6 +75,11 @@ jobs:
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_os_process_supervisor_clean_and_kill --nocapture
+      - name: STY-G2-06c real Linux SIGKILL followed by safe direct QUIC recovery
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+          STY_G2_06C_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/crash-resume
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_network_get -- --exact linux_killed_receiver_redownloads_uncommitted_or_resumes_verified --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
@@ -131,4 +136,8 @@ jobs:
           cmp wire-output/wire-release/resume/missing-0.wire wire-output/wire-fork/resume/missing-0.wire
           cmp wire-output/wire-release/resume/missing-1.wire wire-output/wire-fork/resume/missing-1.wire
           echo STY_G2_06B_RELEASE_FORK_ACTUAL_RESUME_WIRE_IDENTICAL=true
+          for f in checkpointed.ranges checkpointed.first.wire checkpointed.0.wire checkpointed.1.wire uncommitted.ranges uncommitted.first.wire uncommitted.0.wire uncommitted.1.wire; do
+            cmp "wire-output/wire-release/crash-resume/$f" "wire-output/wire-fork/crash-resume/$f"
+          done
+          echo STY_G2_06C_RELEASE_FORK_SIGKILL_SAFE_FALLBACK_WIRE_IDENTICAL=true
           echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true
