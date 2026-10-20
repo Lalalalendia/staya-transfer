@@ -492,6 +492,7 @@ mod tests {
         q.record_verified_staging(b.manifest, b"b").unwrap();
         assert_eq!(q.phase(), QueuePhase::Complete);
     }
+
     #[test]
     fn progress_is_only_verified_staged_bytes_and_never_speculative_transfer() {
         let a = file("a", b"a");
@@ -570,5 +571,4 @@ mod tests {
         assert_eq!(cancelled.verified_staged_bytes, 1);
         assert_eq!(cancelled.remaining_bytes(), 2);
     }
-
 }
