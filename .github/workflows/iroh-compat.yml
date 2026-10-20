@@ -142,6 +142,11 @@ jobs:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
           STY_G2_06I_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/many-ranges
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_many_ranges_gate -- --exact real_fsstore_many_disjoint_bao_ranges_bound_resources_after_cold_reopen --nocapture
+      - name: STY-G1f two real OS processes via direct Iroh QUIC and private staging
+      - name: STY-G1f two real OS processes via direct Iroh QUIC and private staging
+        env:
+          STY_G1F_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/direct-preview
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_manual_direct_file_two_os_processes_and_unlisted_peer_denied --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
@@ -210,4 +215,7 @@ jobs:
           cmp wire-output/wire-release/many-ranges/inventory.txt wire-output/wire-fork/many-ranges/inventory.txt
           cmp wire-output/wire-release/many-ranges/physical-ranges.txt wire-output/wire-fork/many-ranges/physical-ranges.txt
           echo STY_G2_06I_RELEASE_FORK_64_PHYSICAL_BAO_RANGES_IDENTICAL=true
+          cmp wire-output/wire-release/direct-preview/received.bin wire-output/wire-fork/direct-preview/received.bin
+          cmp wire-output/wire-release/direct-preview/inventory.txt wire-output/wire-fork/direct-preview/inventory.txt
+          echo STY_G1F_RELEASE_FORK_TWO_PROCESS_DIRECT_PREVIEW_IDENTICAL=true
           echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true
