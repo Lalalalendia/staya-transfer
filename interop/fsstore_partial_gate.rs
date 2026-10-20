@@ -6,6 +6,9 @@
 #[path = "fsstore_partial_adapter.rs"]
 mod partial_adapter;
 
+#[path = "fsstore_shutdown_supervisor.rs"]
+mod shutdown_supervisor;
+
 use bao_tree::{
     BlockSize, ByteRanges,
     io::{outboard::PreOrderMemOutboard, round_up_to_chunks, sync::encode_ranges_validated},
@@ -14,9 +17,10 @@ use iroh_blobs::{Hash, api::blobs::BlobStatus, store::fs::FsStore};
 use partial_adapter::{
     audit_clean_closed_fixture, stage_verified_fixture, stage_with_inflight_budget,
 };
+use shutdown_supervisor::ActiveFsStore;
 use staya_custody_lab::{
     StoreLease,
-    admission::{Limits, SharedAdmission},
+    admission::{Limits, Reservation, SharedAdmission},
     checkpoint::{CheckpointClaim, IROH_PREORDER_16K, read_candidates},
     partial_barrier::publish_after_quiescent_audit,
 };
@@ -395,6 +399,218 @@ async fn real_fsstore_admission_rejects_before_write_and_releases_after_stage() 
     })
     .await
     .expect("bounded G2-05f real FsStore fixture");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_fsstore_supervised_quiescence_blocks_early_handoff_and_reaudits_bao() {
+    tokio::time::timeout(TIMEOUT, async {
+        let root = std::env::temp_dir().join(format!(
+            "staya-g2-05h2-{}-{}",
+            std::process::id(),
+            std::env::var("STY_INTEROP_VARIANT").unwrap_or_else(|_| "ci".to_owned()),
+        ));
+        assert!(!root.exists(), "no existing user store may be reused");
+        fs::create_dir(&root).expect("new private test root");
+        let payload = make_data();
+        let (expected, wire) = prepare(&payload);
+        let reserved_bytes = range()
+            .len()
+            .checked_add(u64::try_from(wire.len()).unwrap())
+            .unwrap();
+        let active = ActiveFsStore::open(
+            &root,
+            Limits {
+                max_partial_objects: 1,
+                max_reserved_bytes: reserved_bytes,
+                max_open_handles: 4,
+                max_retries_per_object: 2,
+            },
+        )
+        .await
+        .expect("real actor must start under its OS owner");
+
+        let cancelled = AtomicBool::new(false);
+        let (_accepted, held_permit) = active
+            .stage(expected, range(), &wire, &cancelled)
+            .await
+            .expect("real Bao import accepted under a live permit");
+        let closing = active
+            .begin_closing()
+            .unwrap_or_else(|(_, e)| panic!("cannot begin real actor closure: {e}"));
+        assert!(
+            closing
+                .admissions()
+                .reserve(Reservation::new(1, 1, 1).unwrap())
+                .is_err(),
+            "no permits from late clones after Closing begins"
+        );
+
+        // Actor shutdown is denied, and the original OS lease remains
+        // owned, while one real imported range still has an active permit.
+        let closing = match closing.finish().await {
+            Ok(_) => panic!("a live permit may not become quiescent"),
+            Err((closing, error)) => {
+                assert!(error.contains("permits have not drained"), "{error}");
+                closing
+            }
+        };
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock
+            ),
+            "failed quiescence may not permit a second cooperative OS writer"
+        );
+
+        drop(held_permit);
+        assert!(closing.admissions().admissions_drained().unwrap());
+        // Only the *actual* pinned FsStore actor's successful shutdown can
+        // construct the private quiescence witness. No caller can mint it.
+        let quiescent = match closing.finish().await {
+            Ok(result) => result,
+            Err((_, err)) => panic!("real FsStore actor shutdown failed: {err}"),
+        };
+        assert!(quiescent.admissions_drained().unwrap());
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock
+            ),
+            "quiescent witness must still hold OS custody for Bao audit"
+        );
+        let physical = audit_clean_closed_fixture(&root, expected, range())
+            .expect("independently authenticate the physical sparse Bao range");
+        assert_eq!(physical, payload[START as usize..END as usize]);
+        assert!(
+            read_candidates(
+                quiescent.owner(),
+                expected.manifest.id.0,
+                expected.manifest.size,
+                IROH_PREORDER_16K,
+            )
+            .unwrap()
+            .is_empty(),
+            "successfully closing an actor must not publish a checkpoint"
+        );
+        quiescent.finish_clean(); // drops the lock; NEVER calls explicit LOCK_UN.
+
+        let second = StoreLease::acquire(&root)
+            .expect("another cooperative writer can acquire after clean closure");
+        let reopened = FsStore::load(&root)
+            .await
+            .expect("real actor reopens while the second owner is held");
+        let authenticated = audit_clean_closed_fixture(&root, expected, range())
+            .expect("reopened owner independently rechecks the same bytes");
+        assert_eq!(authenticated, payload[START as usize..END as usize]);
+        reopened
+            .shutdown()
+            .await
+            .expect("second actor must shut down cleanly");
+        drop(reopened);
+        drop(second);
+        fs::remove_dir_all(&root).expect("remove only disposable test root");
+        println!(
+            "STY_G2_05H2 real_fsstore=true owner_held_during_drain=true close_denied_with_permit=true actor_shutdown_confirmed=true quiescent_witness_private=true physical_bao_reverified=true checkpoint_minted=false explicit_lock_un=false child_writer_join_proven=false file_gate=false"
+        );
+    })
+    .await
+    .expect("bounded real FsStore actor shutdown fixture");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit() {
+    // Test the fail-closed emergency path in a disposable INDEPENDENT
+    // subprocess. Intentional custody leakage cannot contaminate unrelated
+    // test cases, and process exit must release the leaked OS handle.
+    const MARKER: &str = "STY_G2_05H2_ABANDONED_ACTOR_HOLD";
+    const OPEN_MARKER: &str = "STY_G2_05H2_ABANDONED_OPEN_HOLD";
+    if let Some(root) = std::env::var_os("STY_G2_05H2_OPEN_CHILD_ROOT") {
+        let root = std::path::PathBuf::from(root);
+        // Simulate cancellation after acquiring the opening lease. This
+        // tests the opening guard's Drop, NOT a real interrupted actor load.
+        shutdown_supervisor::simulate_cancelled_open_for_test(&root)
+            .expect("cancelled opening lease must remain held");
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock
+            ),
+            "cancelled opening may not admit another writer"
+        );
+        println!("{OPEN_MARKER} custody_retained=true");
+        return;
+    }
+    if let Some(root) = std::env::var_os("STY_G2_05H2_ABANDON_CHILD_ROOT") {
+        let root = std::path::PathBuf::from(root);
+        let active = ActiveFsStore::open(
+            &root,
+            Limits {
+                max_partial_objects: 1,
+                max_reserved_bytes: 4096,
+                max_open_handles: 4,
+                max_retries_per_object: 1,
+            },
+        )
+        .await
+        .expect("child starts real FsStore under OS custody");
+        // No successful actor shutdown has occurred. Dropping must HOLD the
+        // original OS lease despite the actor object being abandoned.
+        drop(active);
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock
+            ),
+            "prematurely dropped active actor must not enable a new writer"
+        );
+        println!("{MARKER} custody_retained=true");
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "staya-g2-05h2-abandon-parent-{}",
+        std::process::id()
+    ));
+    assert!(!root.exists(), "only use a fresh private root");
+    fs::create_dir(&root).expect("private test root");
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit")
+        .arg("--nocapture")
+        .env("STY_G2_05H2_ABANDON_CHILD_ROOT", &root)
+        .output()
+        .expect("run OS-independent actor-abandon test child");
+    let output = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.status.success() && output.contains(MARKER),
+        "abandoned-actor subprocess: stdout={output} stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    // Killing/exiting the OS process ultimately closes its handles. No
+    // journal claim, bytes reuse or filesystem durability is inferred.
+    let owner = StoreLease::acquire(&root)
+        .expect("a new process may reacquire after the abandoned process exits");
+    drop(owner);
+    let cancelled_open = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("real_fsstore_abandoned_actor_drop_keeps_os_lock_until_process_exit")
+        .arg("--nocapture")
+        .env("STY_G2_05H2_OPEN_CHILD_ROOT", &root)
+        .output()
+        .expect("run independent simulated opening-cancellation child");
+    let open_output = String::from_utf8_lossy(&cancelled_open.stdout);
+    assert!(
+        cancelled_open.status.success() && open_output.contains(OPEN_MARKER),
+        "cancelled opening subprocess: stdout={open_output} stderr={}",
+        String::from_utf8_lossy(&cancelled_open.stderr)
+    );
+    let after_open = StoreLease::acquire(&root)
+        .expect("OS process exit must release intentionally leaked opening custody");
+    drop(after_open);
+    fs::remove_dir_all(&root).expect("dispose private fixture");
+    println!(
+        "STY_G2_05H2_ABANDON_RECOVERY real_process=true lock_held_before_exit=true cancelled_opening_guard=true reacquire_after_exit=true durable_receipt=false"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
