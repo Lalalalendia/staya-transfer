@@ -244,3 +244,195 @@ fn run_manual_preview(lab_drop: bool) {
         "STY_G1F separate_sender_receiver=true QUIC=true root_verified=true unauthorized_denied=true staging_only=true forced_reconnect={lab_drop}"
     );
 }
+
+#[test]
+fn three_explicit_files_real_quic_serial_queue_with_physical_readback() {
+    use staya_transfer::{
+        ContentId, Manifest,
+        queue::{ItemOutcome, QueuePhase, QueueSelection, SelectedFile},
+    };
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let fixture = std::env::temp_dir().join(format!("staya-g1k-{}-{nonce}", std::process::id()));
+    fs::create_dir(&fixture).expect("owned synthetic queue fixture");
+    let payloads = [
+        vec![0x13],
+        (0..64 * 1024)
+            .map(|i| ((i * 19 + 11) % 251) as u8)
+            .collect(),
+        (0..1024 * 1024 + 17)
+            .map(|i| ((i * 43 + 17) % 251) as u8)
+            .collect(),
+    ];
+    let selected: Vec<_> = payloads
+        .iter()
+        .enumerate()
+        .map(|(i, bytes)| SelectedFile {
+            label: format!("item-{:04}.bin", i + 1),
+            manifest: Manifest {
+                id: ContentId(*blake3::hash(bytes).as_bytes()),
+                size: bytes.len() as u64,
+            },
+        })
+        .collect();
+    let plan = QueueSelection::new(selected.clone()).expect("bounded trusted local selection");
+    assert_eq!(plan.entries().len(), 3);
+    let commit = plan.commitment();
+    let mut queue = plan.into_cursor();
+    let mut inventory = format!("local_selection={}\n", hex_digest(&commit));
+
+    for (i, bytes) in payloads.iter().enumerate() {
+        assert_eq!(queue.current_index(), i);
+        assert_eq!(queue.current().unwrap().manifest, selected[i].manifest);
+        let source = fixture.join(format!("selected-{i:03}.bin"));
+        fs::write(&source, bytes).expect("selected local-only synthetic source");
+
+        // Every item uses a real, independent OS sender and receiver,
+        // manually authenticated peer and immutable root, not a mock wire.
+        let (mut permitted, permitted_lines) = new_receiver(false);
+        let allowed = next_line(&permitted_lines)
+            .strip_prefix("PEER_ID ")
+            .expect("receiver announces ephemeral identity")
+            .to_owned();
+
+        let mut sender = OwnedProcess(
+            Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"))
+                .arg("serve")
+                .arg(&source)
+                .arg(&allowed)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("real selected object provider"),
+        );
+        let announced = capture(&mut sender.0);
+        let invitation = next_line(&announced);
+        let parts: Vec<_> = invitation.split_whitespace().collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "CONNECT");
+        assert_eq!(parts[2], blake3::hash(bytes).to_hex().as_str());
+        assert_eq!(parts[3], bytes.len().to_string());
+
+        // A different peer with the same invitation must not obtain data.
+        if i != 1 {
+            let (mut outsider, outsider_lines) = new_receiver(false);
+            let outsider_id = next_line(&outsider_lines);
+            assert_ne!(outsider_id, format!("PEER_ID {allowed}"));
+            outsider
+                .0
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(invitation.as_bytes())
+                .unwrap();
+            outsider.0.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+            drop(outsider.0.stdin.take());
+            assert!(
+                !exited(&mut outsider.0).success(),
+                "unlisted peer got queue item {i}"
+            );
+            assert!(outsider_lines.try_iter().all(|s| !s.starts_with("STAGED ")));
+        }
+
+        permitted
+            .0
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(invitation.as_bytes())
+            .unwrap();
+        permitted
+            .0
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        drop(permitted.0.stdin.take());
+        let report = next_line(&permitted_lines);
+        assert!(
+            report.starts_with("STAGED "),
+            "queue item {i} failed: {report}"
+        );
+        assert!(report.contains("NOT_APPLIED=true"));
+        assert!(report.contains(&format!("ROOT={}", parts[2])));
+        let destination = PathBuf::from(
+            report
+                .strip_prefix("STAGED ")
+                .unwrap()
+                .split(" ROOT=")
+                .next()
+                .unwrap(),
+        );
+        let private = destination
+            .parent()
+            .expect("private staging root")
+            .to_path_buf();
+        assert!(private.starts_with(std::env::temp_dir()));
+        assert!(
+            private
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("staya-direct-preview-receiver-")
+        );
+        let readback = fs::read(&destination).expect("real staged bytes on disk");
+        assert_eq!(
+            readback, *bytes,
+            "independent physical queue item {i} mismatch"
+        );
+        assert!(exited(&mut permitted.0).success());
+
+        // Only an exact local root/length can advance the queue; not STAGED
+        // stdout and never a network-provided filename or APPLIED flag.
+        queue
+            .record_verified_staging(selected[i].manifest, &readback)
+            .expect("actual staged bytes match locally selected manifest");
+        assert_eq!(queue.outcomes()[i], ItemOutcome::VerifiedStaged);
+        inventory.push_str(&format!(
+            "item={i} bytes={} blake3={} staged_and_reaudited=true\n",
+            readback.len(),
+            blake3::hash(&readback).to_hex()
+        ));
+
+        if let Some(out) = std::env::var_os("STY_G1K_OUTPUT_DIR") {
+            let out = PathBuf::from(out);
+            fs::create_dir_all(&out).unwrap();
+            fs::write(out.join(format!("selected-{i:03}.bin")), &readback).unwrap();
+        }
+        drop(sender.0.stdin.take());
+        assert!(
+            exited(&mut sender.0).success(),
+            "provider should close cleanly"
+        );
+        fs::remove_dir_all(private).expect("delete only own random private staging");
+    }
+    assert_eq!(queue.phase(), QueuePhase::Complete);
+    assert!(
+        queue
+            .outcomes()
+            .iter()
+            .all(|s| *s == ItemOutcome::VerifiedStaged)
+    );
+    if let Some(out) = std::env::var_os("STY_G1K_OUTPUT_DIR") {
+        fs::write(PathBuf::from(out).join("inventory.txt"), inventory).unwrap();
+    }
+    fs::remove_dir_all(fixture).expect("remove disposable local queue fixture");
+    println!(
+        "STY_G1K_REAL_QUIC sessions=3 authorized_only=true \
+         ordered_roots=true cold_staged_bytes=true no_file_gate=true"
+    );
+}
+
+fn hex_digest(bytes: &[u8; 32]) -> String {
+    let mut output = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").unwrap();
+    }
+    output
+}
