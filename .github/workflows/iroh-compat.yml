@@ -70,6 +70,10 @@ jobs:
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_os_process_supervisor_clean_and_kill --nocapture
+      - name: STY-G2-06f corrupt real FsStore sidecars and replayed candidates
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_missing_sidecars_and_corruption_refuse_candidate_reaudit --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check

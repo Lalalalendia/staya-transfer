@@ -992,3 +992,158 @@ async fn real_fsstore_os_process_supervisor_clean_and_kill() {
         );
     }
 }
+
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn real_fsstore_missing_sidecars_and_corruption_refuse_candidate_reaudit() {
+    use staya_custody_lab::partial_barrier::reaudit_untrusted_candidate_backings;
+    use staya_transfer::{
+        TransferBudget,
+        planner::{MissingRanges, VerifiedCheckpoint},
+    };
+
+    tokio::time::timeout(TIMEOUT, async {
+        let root = std::env::temp_dir().join(format!(
+            "staya-g2-06f-{}-{}",
+            std::process::id(),
+            std::env::var("STY_INTEROP_VARIANT").unwrap_or_else(|_| "ci".to_owned()),
+        ));
+        assert!(!root.exists(), "private fixture must be new");
+        fs::create_dir(&root).unwrap();
+        let owner = StoreLease::acquire(&root).unwrap();
+        let data = make_data();
+        let (identity, wire) = prepare(&data);
+        let store = FsStore::load(&root).await.expect("real pinned FsStore");
+        stage_verified_fixture(&store, identity, range(), &wire)
+            .await
+            .expect("root-authenticated Bao partial import");
+        store.shutdown().await.expect("actor must quiesce before publication");
+        drop(store);
+        let claim = CheckpointClaim {
+            sequence: 1,
+            content_root: identity.manifest.id.0,
+            object_len: identity.manifest.size,
+            bao_profile: IROH_PREORDER_16K,
+            start: START,
+            end: END,
+        };
+        let independently_audit = || -> io::Result<()> {
+            let saved = audit_clean_closed_fixture(&root, identity, range())
+                .map_err(io::Error::other)?;
+            if saved != data[START as usize..END as usize] {
+                return Err(io::Error::other("stored physical Bao bytes differ"));
+            }
+            Ok(())
+        };
+        publish_after_quiescent_audit(&owner, claim, |_| independently_audit())
+            .expect("Unix physical durability and valid Bao required");
+        assert_eq!(
+            read_candidates(
+                &owner,
+                identity.manifest.id.0,
+                identity.manifest.size,
+                IROH_PREORDER_16K,
+            )
+            .unwrap(),
+            vec![claim]
+        );
+        reaudit_untrusted_candidate_backings(&owner, claim, |_| independently_audit())
+            .expect("unaltered physical Bao and sidecars must audit");
+
+        let hex = Hash::from_bytes(identity.manifest.id.0).to_hex();
+        let data_file = root.join("data").join(format!("{hex}.data"));
+        let outboard_file = root.join("data").join(format!("{hex}.obao4"));
+        let sizes_file = root.join("data").join(format!("{hex}.sizes4"));
+        let bitfield_file = root.join("data").join(format!("{hex}.bitfield"));
+
+        // Mutate a byte inside the actual admitted Bao interval.
+        let clean_data = fs::read(&data_file).unwrap();
+        let mut damaged_data = clean_data.clone();
+        damaged_data[START as usize] ^= 0x80;
+        fs::write(&data_file, damaged_data).unwrap();
+        assert!(
+            reaudit_untrusted_candidate_backings(&owner, claim, |_| independently_audit())
+                .is_err(),
+            "an intact checkpoint cannot mask altered persisted data"
+        );
+        fs::write(&data_file, clean_data).unwrap();
+        reaudit_untrusted_candidate_backings(&owner, claim, |_| independently_audit()).unwrap();
+
+        // Truncate the real sparse Bao outboard, then restore it.
+        let clean_outboard = fs::read(&outboard_file).unwrap();
+        fs::write(&outboard_file, []).unwrap();
+        assert!(
+            reaudit_untrusted_candidate_backings(&owner, claim, |_| independently_audit())
+                .is_err(),
+            "empty physical outboard must not be trusted"
+        );
+        fs::write(&outboard_file, clean_outboard).unwrap();
+        reaudit_untrusted_candidate_backings(&owner, claim, |_| independently_audit()).unwrap();
+
+        // The low-level Bao audit uses data+outboard; the candidate wrapper
+        // additionally fails closed on absent sizes4 or bitfield metadata.
+        for p in [&sizes_file, &bitfield_file] {
+            let moved = root.join(format!(
+                "saved-{}",
+                p.file_name().unwrap().to_str().unwrap()
+            ));
+            fs::rename(p, &moved).unwrap();
+            assert!(
+                reaudit_untrusted_candidate_backings(&owner, claim, |_| independently_audit())
+                    .is_err(),
+                "missing actual FsStore sidecar cannot authorize reuse"
+            );
+            fs::rename(moved, p).unwrap();
+            reaudit_untrusted_candidate_backings(&owner, claim, |_| independently_audit()).unwrap();
+        }
+
+        // Copy a syntactically valid unkeyed journal to an unrelated store.
+        // It is still only metadata: without physical Bao there is NO skip.
+        let journal_name = ".staya-cp-0000000000000001.bin";
+        let copied_journal = fs::read(root.join(journal_name)).unwrap();
+        let foreign = root.join("foreign");
+        fs::create_dir(&foreign).unwrap();
+        let foreign_owner = StoreLease::acquire(&foreign).unwrap();
+        fs::write(foreign.join(journal_name), copied_journal).unwrap();
+        assert_eq!(
+            read_candidates(
+                &foreign_owner,
+                identity.manifest.id.0,
+                identity.manifest.size,
+                IROH_PREORDER_16K,
+            )
+            .unwrap(),
+            vec![claim],
+            "checksum-correct copy parses as an UNTRUSTED candidate only"
+        );
+        assert!(
+            reaudit_untrusted_candidate_backings(&foreign_owner, claim, |_| Ok(())).is_err(),
+            "an intact foreign journal cannot replace actual sidecar validation"
+        );
+        drop(foreign_owner);
+
+        // Without an independently reverified physical Bao range the planner
+        // must schedule EVERY byte, never trust the old journal or bitmap.
+        let budget = TransferBudget {
+            max_inflight_bytes: 1024 * 1024,
+            max_sources: 1,
+            max_retries: 0,
+        };
+        let no_verified_ranges = VerifiedCheckpoint::empty(identity.manifest);
+        let full_retry: u64 =
+            MissingRanges::from_checkpoint(identity.manifest, &no_verified_ranges, budget)
+                .unwrap()
+                .map(|part| part.len())
+                .sum();
+        assert_eq!(full_retry, identity.manifest.size);
+
+        drop(owner);
+        fs::remove_dir_all(root).unwrap();
+        println!(
+            "STY_G2_06F real_fsstore=true corrupt_data_denied=true outboard_denied=true missing_sizes_denied=true missing_bitfield_denied=true replayed_journal_untrusted=true no_proof_full_retry=true windows_skip_unsupported=true"
+        );
+    })
+    .await
+    .expect("bounded G2-06f real sidecar corruption gate");
+}

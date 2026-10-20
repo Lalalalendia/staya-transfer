@@ -1,0 +1,9 @@
+# ADR-0023 - STY-G2-06f real partial sidecar integrity and untrusted journal
+
+This isolated laboratory expands the corruption/replay subcase of [G2-06 release gate #23](https://github.com/Lalalalendia/staya-transfer/issues/23), independently of the stacked network PRs #28-30 and journal-only PR #31.
+
+New cooperative Unix helper `reaudit_untrusted_candidate_backings` demands a matching *untrusted* checkpoint claim, all four actual pinned backing files, stable physical identities and an independently supplied Bao validator. It returns only `io::Result<()>`, never a VerifiedCheckpoint, skip capability, application receipt or File Gate grant. Hostile concurrent same-inode writes/path races and a dishonest callback remain outside its lab-only trust boundary. Windows always refuses with Unsupported because parent-directory power-loss durability is unproven.
+
+Both pinned Iroh release/fork variants stage a real verified partial into FsStore, cleanly shut down the actor, publish a Unix metadata claim after physical audit, then separately corrupt a stored data byte, truncate the actual sparse outboard, remove sizes4, remove bitfield, and replay a correct metadata record into an unrelated empty private store. Every damaged/missing backing must deny re-audit even with an intact record checksum. Replayed metadata is parseable *only as a candidate*, never as physical proof. Empty verified-range inventory must schedule full re-download.
+
+Explicit limitations: this experiment does not kill the receiver, claim power-loss durability on Windows, exercise hostile rename racing, authenticate metadata with a secret, verify multi-device relay transfer, or implement Akula File Gate. Green tests are evidence for a narrow subset, not completion of the seven independent G2-06 acceptance rows.
