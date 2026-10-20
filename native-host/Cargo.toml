@@ -9,3 +9,7 @@ publish = false
 # Native FFI is confined here; custody/src/lib.rs keeps forbid(unsafe_code).
 [workspace]
 resolver = "3"
+
+[[bin]]
+name = "staya-linux-ipc-fixture"
+path = "src/bin/ipc_fixture.rs"
