@@ -147,6 +147,28 @@ impl QueueSelection {
     }
 }
 
+/// Observable queue progress, based **only** on completely BLAKE3-verified
+/// staged items. Never present this as network bytes, durable storage or
+/// successfully APPLIED Akula revisions. Partial GETs and retries do not count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VerifiedStagingProgress {
+    pub phase: QueuePhase,
+    pub selected_items: usize,
+    pub verified_staged_items: usize,
+    pub selected_bytes: u64,
+    pub verified_staged_bytes: u64,
+}
+
+impl VerifiedStagingProgress {
+    pub fn remaining_items(&self) -> usize {
+        self.selected_items - self.verified_staged_items
+    }
+
+    pub fn remaining_bytes(&self) -> u64 {
+        self.selected_bytes - self.verified_staged_bytes
+    }
+}
+
 /// Only verified locally pinned full-object bytes may advance this cursor.
 /// A staged receipt cannot authorize network access or commit a user file.
 #[derive(Debug)]
@@ -174,6 +196,27 @@ impl QueueCursor {
     pub fn retries_current(&self) -> u8 {
         self.retries
     }
+
+    /// Derive from immutable selection + checked outcomes rather than
+    /// trusting external receipts or speculative network ranges.
+    pub fn verified_staging_progress(&self) -> VerifiedStagingProgress {
+        let mut verified_staged_items = 0usize;
+        let mut verified_staged_bytes = 0u64;
+        for (item, outcome) in self.selection.entries.iter().zip(self.outcomes.iter()) {
+            if *outcome == ItemOutcome::VerifiedStaged {
+                verified_staged_items += 1;
+                verified_staged_bytes += item.manifest.size;
+            }
+        }
+        VerifiedStagingProgress {
+            phase: self.phase,
+            selected_items: self.selection.entries.len(),
+            verified_staged_items,
+            selected_bytes: self.selection.total_bytes,
+            verified_staged_bytes,
+        }
+    }
+
     pub fn current(&self) -> Option<&SelectedFile> {
         (self.phase == QueuePhase::Running)
             .then(|| self.selection.entries.get(self.index))
@@ -449,4 +492,83 @@ mod tests {
         q.record_verified_staging(b.manifest, b"b").unwrap();
         assert_eq!(q.phase(), QueuePhase::Complete);
     }
+    #[test]
+    fn progress_is_only_verified_staged_bytes_and_never_speculative_transfer() {
+        let a = file("a", b"a");
+        let b = file("b", b"bb");
+        let c = file("c", b"ccc");
+        let mut q = QueueSelection::new(vec![a.clone(), b.clone(), c.clone()])
+            .unwrap()
+            .into_cursor();
+
+        let start = q.verified_staging_progress();
+        assert_eq!(start.phase, QueuePhase::Running);
+        assert_eq!(start.selected_items, 3);
+        assert_eq!(start.selected_bytes, 6);
+        assert_eq!(start.verified_staged_items, 0);
+        assert_eq!(start.verified_staged_bytes, 0);
+        assert_eq!(start.remaining_items(), 3);
+        assert_eq!(start.remaining_bytes(), 6);
+
+        q.retry_transport_failure().unwrap();
+        q.pause().unwrap();
+        let paused = q.verified_staging_progress();
+        assert_eq!(paused.phase, QueuePhase::Paused);
+        assert_eq!(paused.verified_staged_bytes, 0);
+        q.resume().unwrap();
+        q.record_verified_staging(a.manifest, b"a").unwrap();
+
+        let one = q.verified_staging_progress();
+        assert_eq!(one.verified_staged_items, 1);
+        assert_eq!(one.verified_staged_bytes, 1);
+        assert_eq!(one.remaining_items(), 2);
+        assert_eq!(one.remaining_bytes(), 5);
+        assert_eq!(one.phase, QueuePhase::Running);
+
+        // A remote "complete" event or corrupt bytes cannot inflate progress.
+        assert_eq!(
+            q.record_verified_staging(b.manifest, b"xx"),
+            Err(QueueError::UntrustedBytes)
+        );
+        let held = q.verified_staging_progress();
+        assert_eq!(held.phase, QueuePhase::Held);
+        assert_eq!(held.verified_staged_items, 1);
+        assert_eq!(held.verified_staged_bytes, 1);
+        assert_eq!(held.remaining_bytes(), 5);
+        assert_eq!(
+            q.record_verified_staging(b.manifest, b"bb"),
+            Err(QueueError::NotRunning)
+        );
+        assert_eq!(held, q.verified_staging_progress());
+
+        let mut completed = QueueSelection::new(vec![a.clone(), b.clone()])
+            .unwrap()
+            .into_cursor();
+        completed.record_verified_staging(a.manifest, b"a").unwrap();
+        completed.record_verified_staging(b.manifest, b"bb").unwrap();
+        let done = completed.verified_staging_progress();
+        assert_eq!(done.phase, QueuePhase::Complete);
+        assert_eq!(done.verified_staged_items, 2);
+        assert_eq!(done.verified_staged_bytes, 3);
+        assert_eq!(done.remaining_items(), 0);
+        assert_eq!(done.remaining_bytes(), 0);
+    }
+
+    #[test]
+    fn cancellation_cannot_make_unverified_bytes_look_complete() {
+        let a = file("a", b"a");
+        let b = file("b", b"bb");
+        let mut queue = QueueSelection::new(vec![a.clone(), b])
+            .unwrap()
+            .into_cursor();
+        queue.record_verified_staging(a.manifest, b"a").unwrap();
+        queue.pause().unwrap();
+        queue.cancel().unwrap();
+        let cancelled = queue.verified_staging_progress();
+        assert_eq!(cancelled.phase, QueuePhase::Cancelled);
+        assert_eq!(cancelled.verified_staged_items, 1);
+        assert_eq!(cancelled.verified_staged_bytes, 1);
+        assert_eq!(cancelled.remaining_bytes(), 2);
+    }
+
 }
