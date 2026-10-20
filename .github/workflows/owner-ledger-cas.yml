@@ -60,7 +60,13 @@ jobs:
             '.github/workflows/owner-remote-quorum.yml',
             'docs/ADR-0029-two-remote-denial-witnesses.md',
           }
-          assert actual in (expected, expected|anchor_layer, expected|anchor_layer|quorum_layer), (
+          ydb_layer={
+            'interop/owner-witness-lab/owner_ydb_docapi.go',
+            'interop/owner-witness-lab/owner_ydb_docapi_test.go',
+            'docs/ADR-0030-ydb-document-denial-cas.md',
+            '.github/workflows/owner-ydb-cas.yml',
+          }
+          assert actual in (expected, expected|anchor_layer, expected|anchor_layer|quorum_layer, expected|anchor_layer|quorum_layer|ydb_layer), (
               'unknown/nonconsecutive lab scope',actual
           )
           assert not any(n.startswith(('src/','custody/','interop/fork/')) for n in actual)

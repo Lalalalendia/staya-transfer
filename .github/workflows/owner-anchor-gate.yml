@@ -54,7 +54,13 @@ jobs:
             '.github/workflows/owner-remote-quorum.yml',
             'docs/ADR-0029-two-remote-denial-witnesses.md',
           }
-          assert actual in (expected, expected|quorum_layer), ('out of lab scope', actual)
+          ydb_layer={
+            'interop/owner-witness-lab/owner_ydb_docapi.go',
+            'interop/owner-witness-lab/owner_ydb_docapi_test.go',
+            'docs/ADR-0030-ydb-document-denial-cas.md',
+            '.github/workflows/owner-ydb-cas.yml',
+          }
+          assert actual in (expected, expected|quorum_layer, expected|quorum_layer|ydb_layer), ('out of lab scope', actual)
           assert not any(n.startswith(('src/','custody/','interop/fork/')) for n in actual)
           PY
           git diff --check
@@ -72,6 +78,6 @@ jobs:
       - name: Mandatory research-only and fail-closed summary
         shell: bash
         run: |
-          echo 'Only an in-memory test double implements the external anchor interface.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'An HTTP Document API client also exists, but only in a local TLS mock; no actual remote trusted CAS is deployed.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Ledger vs anchor divergence, offline root and ambiguous seal result require HOLD.' >> "$GITHUB_STEP_SUMMARY"
           echo 'No real rollback-resistant anchor, full positive policy root, P2P grants, File Gate, APPLIED or ACK.' >> "$GITHUB_STEP_SUMMARY"
