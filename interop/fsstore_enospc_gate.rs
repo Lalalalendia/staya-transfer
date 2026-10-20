@@ -105,8 +105,18 @@ async fn real_fsstore_enospc_rejects_writer_and_cold_restart() {
         .sum();
         assert_eq!(missing, OBJECT_LEN as u64, "recovery must redownload everything");
         reopened.shutdown().await.expect("cold actor shutdown");
+        // Physical data may or may not survive disk-full. Even an authentic
+        // partial range without a checkpoint cannot authorize a skip.
+        let preserved = partial_adapter::audit_clean_closed_fixture(
+            &root,
+            identity,
+            ByteRange::new(FIRST_START, FIRST_END, identity.manifest.size).unwrap(),
+        )
+        .is_ok();
         drop(owner);
-        println!("STY_G2_06H_COLD second_os_process=true candidates=0 redownload=full");
+        println!(
+            "STY_G2_06H_COLD second_os_process=true candidates=0 redownload=full first_physical_valid={preserved}"
+        );
         return;
     }
 
