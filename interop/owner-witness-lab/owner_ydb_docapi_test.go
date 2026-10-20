@@ -23,6 +23,7 @@ type documentAPIFixture struct {
 	mu                    sync.Mutex
 	row                   map[string]ydbAttr
 	noResponseAfterCommit bool
+	committed             chan struct{}
 	forceStatus           int
 	totalGet, totalUpdate int
 	wireErr               error
@@ -112,6 +113,10 @@ func (f *documentAPIFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.row["DenyDigest"] = v[":nextD"]
 		f.row["Commitment"] = v[":nextC"]
 		if f.noResponseAfterCommit {
+			if f.committed != nil {
+				close(f.committed)
+				f.committed = nil
+			}
 			<-r.Context().Done() // simulate remote commit + lost acknowledgement
 			return
 		}
@@ -139,7 +144,7 @@ func newYDBFixture(t *testing.T, head Head) (*YDBDocumentDenialAnchor, *document
 	// never connect to a non-YDB host or disable production TLS validation.
 	provider.endpoint = srv.URL
 	provider.client = srv.Client()
-	provider.client.Timeout = 120 * time.Millisecond
+	provider.client.Timeout = 5 * time.Second
 	provider.client.Transport.(*http.Transport).TLSClientConfig.MinVersion = tls.VersionTLS12
 	return provider, serverState
 }
@@ -231,12 +236,29 @@ func TestYDBLostCASAcknowledgementNeverReturnsSuccess(t *testing.T) {
 	path := preinstallLedger(t)
 	original, _ := ReadLedgerHead(path, testLedgerInstallation, testLedgerVault)
 	p, f := newYDBFixture(t, original)
+	committed := make(chan struct{})
 	f.mu.Lock()
 	f.noResponseAfterCommit = true
+	f.committed = committed
 	f.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if _, err := AppendOwnerDenyWithAnchor(ctx, path, testLedgerInstallation, testLedgerVault, testLedgerReplica, 0, 0, p); !errors.Is(err, ErrAnchorHold) {
+	outcome := make(chan error, 1)
+	go func() {
+		_, err := AppendOwnerDenyWithAnchor(ctx, path, testLedgerInstallation, testLedgerVault, testLedgerReplica, 0, 0, p)
+		outcome <- err
+	}()
+	// Wait for real remote state mutation before cancelling the response.
+	// A short fixed timeout before commit can fail on busy Windows runners.
+	select {
+	case <-committed:
+		cancel()
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-outcome
+		t.Fatal("remote conditional update never committed")
+	}
+	if err := <-outcome; !errors.Is(err, ErrAnchorHold) {
 		t.Fatalf("lost CAS acknowledgement should HOLD: %v", err)
 	}
 	// Only an independent, fresh diagnostic (after this unknown result) can
