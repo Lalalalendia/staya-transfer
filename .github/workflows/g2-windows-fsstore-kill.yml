@@ -56,6 +56,15 @@ jobs:
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_parent_death_fails_closed_without_clean_ack --nocapture
       - name: G2-05h3d real Windows child join before pinned actor shutdown
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_registered_child_join_precedes_actor_quiescence --nocapture
+      - name: STY-G1f actual two-process direct QUIC preview and refused outsider
+        env:
+          STY_G1F_OUTPUT_DIR: ${{ github.workspace }}/g1f-private-preview
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_manual_direct_file_two_os_processes_and_unlisted_peer_denied --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-direct-preview-${{ matrix.variant }}
+          path: g1f-private-preview/
+          if-no-files-found: error
       - name: Strict Windows integration lint
         run: cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --all-targets -- -D warnings
       - name: Windows integration format
@@ -76,3 +85,12 @@ jobs:
           cmp compare/windows-terminate-quic-release/redownload-0.wire compare/windows-terminate-quic-fork/redownload-0.wire
           cmp compare/windows-terminate-quic-release/redownload-1.wire compare/windows-terminate-quic-fork/redownload-1.wire
           echo STY_G2_06D_WINDOWS_SAFE_QUIC_FALLBACK_RELEASE_FORK_IDENTICAL=true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: windows-direct-preview-*
+          path: preview
+      - name: Compare Windows release/fork real staged preview bytes
+        run: |
+          cmp preview/windows-direct-preview-release/received.bin preview/windows-direct-preview-fork/received.bin
+          cmp preview/windows-direct-preview-release/inventory.txt preview/windows-direct-preview-fork/inventory.txt
+          echo STY_G1F_WINDOWS_TWO_PROCESS_PRIVATE_PREVIEW_IDENTICAL=true
