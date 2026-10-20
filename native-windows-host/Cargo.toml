@@ -1,0 +1,9 @@
+[package]
+name = "staya-windows-job-lab"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+[workspace]
+resolver = "3"
