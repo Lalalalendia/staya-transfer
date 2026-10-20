@@ -11,6 +11,8 @@ pub mod lab;
 
 pub mod planner;
 
+pub mod queue;
+
 pub mod recovery;
 
 #[cfg(feature = "bao")]
