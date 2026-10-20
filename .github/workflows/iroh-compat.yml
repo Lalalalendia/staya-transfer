@@ -133,6 +133,11 @@ jobs:
           path: enospc-trace/
           if-no-files-found: ignore
           retention-days: 7
+      - name: STY-G2-06i real FsStore 64 sparse Bao groups and cold restart
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+          STY_G2_06I_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/many-ranges
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_many_ranges_gate -- --exact real_fsstore_many_disjoint_bao_ranges_bound_resources_after_cold_reopen --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
@@ -198,4 +203,7 @@ jobs:
           cmp wire-output/wire-release/enospc/inventory.txt wire-output/wire-fork/enospc/inventory.txt
           cmp wire-output/wire-release/enospc/actor-errno.txt wire-output/wire-fork/enospc/actor-errno.txt
           echo STY_G2_06H_RELEASE_FORK_REAL_ENOSPC_IDENTICAL=true
+          cmp wire-output/wire-release/many-ranges/inventory.txt wire-output/wire-fork/many-ranges/inventory.txt
+          cmp wire-output/wire-release/many-ranges/physical-ranges.txt wire-output/wire-fork/many-ranges/physical-ranges.txt
+          echo STY_G2_06I_RELEASE_FORK_64_PHYSICAL_BAO_RANGES_IDENTICAL=true
           echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true

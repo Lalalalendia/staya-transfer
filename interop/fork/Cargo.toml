@@ -41,3 +41,7 @@ path = "../fsstore_disk_budget_gate.rs"
 [[test]]
 name = "fsstore_enospc_gate"
 path = "../fsstore_enospc_gate.rs"
+
+[[test]]
+name = "fsstore_many_ranges_gate"
+path = "../fsstore_many_ranges_gate.rs"
