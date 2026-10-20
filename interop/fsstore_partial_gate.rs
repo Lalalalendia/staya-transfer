@@ -1339,3 +1339,330 @@ async fn real_fsstore_phase_sigkill_requires_independent_root_proof() {
         "STY_G2_06G2 real_fsstore=true root_verified=true sigkill=true release_gated=true power_loss=false file_gate=false"
     );
 }
+
+/// G2-05h3b: The launcher never owns an FsStore lease. A separately launched
+/// child owns the real pinned actor and lease, and its only parent-control
+/// writer is an anonymous stdin pipe held by the launcher process.
+/// The grandparent terminates the launcher with the native OS hard-kill API;
+/// the orphaned writer must observe EOF, exit without a clean-ACK/checkpoint,
+/// and leave the store available only after independent OS reacquisition.
+/// This is a LAB proof of parent-channel loss, NOT authenticated production
+/// IPC, a platform parent-death primitive, or durable partial-object resume.
+#[tokio::test(flavor = "multi_thread")]
+async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
+    use std::{
+        io::Read,
+        path::PathBuf,
+        process::{Child, Command, Stdio},
+        thread,
+        time::{Instant, SystemTime, UNIX_EPOCH},
+    };
+
+    const PARENT_ENV: &str = "STY_G2_05H3B_LAUNCHER_ROOT";
+    const CHILD_ENV: &str = "STY_G2_05H3B_OWNER_ROOT";
+    const CHILD_READY: &str = ".g2-05h3b-child-ready";
+    const PARENT_READY: &str = ".g2-05h3b-parent-ready";
+    const CHILD_EOF: &str = ".g2-05h3b-orphan-saw-eof";
+    const CHILD_ARMED: &str = ".g2-05h3b-owner-armed";
+    const LAUNCHER_ERROR: &str = ".g2-05h3b-launcher-error";
+    const TEST_NAME: &str = "real_fsstore_parent_death_fails_closed_without_clean_ack";
+
+    // Publish CI-only readiness *after* a writable handle has been synced.
+    // Windows FlushFileBuffers rejects read-only File::open() handles.
+    // Rename makes the marker observable only after the full write/sync.
+    fn publish_test_marker(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+        let pending = path.with_extension("unpublished");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(pending, path)
+    }
+
+    if let Some(root) = std::env::var_os(CHILD_ENV) {
+        let root = PathBuf::from(root);
+        let payload = make_data();
+        let (identity, wire) = prepare(&payload);
+        let required = range()
+            .len()
+            .checked_add(u64::try_from(wire.len()).unwrap())
+            .unwrap();
+        let active = ActiveFsStore::open(
+            &root,
+            Limits {
+                max_partial_objects: 1,
+                max_reserved_bytes: required,
+                max_open_handles: 4,
+                max_retries_per_object: 2,
+            },
+        )
+        .await
+        .expect("child opens the actual FsStore under its own OS lease");
+        let cancelled = AtomicBool::new(false);
+        let (_received, permit) = active
+            .stage(identity, range(), &wire, &cancelled)
+            .await
+            .expect("stage authenticated physical Bao while child owns custody");
+        drop(permit);
+        publish_test_marker(
+            &root.join(CHILD_READY),
+            std::process::id().to_string().as_bytes(),
+        )
+        .expect("sync real child-ready marker before publishing");
+
+        // The only pipe writer belongs to the launcher. The launcher is
+        // HARD-KILLED, not told to close stdin cleanly. A broken channel is
+        // NOT a clean shutdown command, so no quiescence witness is issued.
+        // Exchange a real command byte first: startup markers alone cannot
+        // prove that the child's stdin is connected or still open on Windows.
+        // Only after the ARM response may the grandparent test custody.
+        let armed_path = root.join(CHILD_ARMED);
+        let received = tokio::task::spawn_blocking(move || {
+            let mut input = io::stdin().lock();
+            let mut arm = [0u8; 1];
+            input
+                .read_exact(&mut arm)
+                .expect("private parent must send ARM");
+            assert_eq!(arm, [b'A'], "unrecognized parent control command");
+            publish_test_marker(&armed_path, b"ARMED")
+                .expect("sync ARM acknowledgement before publishing");
+            let mut control = [0u8; 1];
+            input.read(&mut control)
+        })
+        .await
+        .expect("blocking stdin reader must join")
+        .expect("private pipe read must complete");
+        assert_eq!(
+            received, 0,
+            "parent death must produce EOF, not an IPC command"
+        );
+        publish_test_marker(&root.join(CHILD_EOF), b"EOF_NO_CLEAN_ACK")
+            .expect("sync orphan EOF diagnostic before publishing");
+
+        // The actor is still live; do NOT fabricate a clean shutdown from
+        // EOF. Terminate this isolated writer process; OS close is the fence.
+        // The next process must independently acquire and audit storage.
+        std::process::exit(77);
+    }
+
+    if let Some(root) = std::env::var_os(PARENT_ENV) {
+        let root = PathBuf::from(root);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .arg("--nocapture")
+            .env(CHILD_ENV, &root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()) // preserve child panic/pipe diagnostics
+            .spawn()
+            .expect("launch independent writer child");
+        assert!(
+            child.stdin.is_some(),
+            "launcher must own private pipe writer"
+        );
+        let started = Instant::now();
+        while !root.join(CHILD_READY).is_file() {
+            if let Some(status) = child.try_wait().expect("inspect child process") {
+                let mut stderr = String::new();
+                if let Some(mut stream) = child.stderr.take() {
+                    let _ = stream.read_to_string(&mut stderr);
+                }
+                let detail = format!(
+                    "child exited before Bao READY: status={status} stderr={stderr}"
+                );
+                fs::write(root.join(LAUNCHER_ERROR), &detail).unwrap();
+                panic!("{detail}");
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(65),
+                "child did not stage Bao under OS custody"
+            );
+            thread::sleep(Duration::from_millis(30));
+        }
+        // Do not report parent-ready until the writer has read an actual
+        // pipe byte from this launcher while keeping the OS lease alive.
+        child
+            .stdin
+            .as_mut()
+            .expect("launcher owns private writer endpoint")
+            .write_all(b"A")
+            .expect("send ARM to live FsStore owner");
+        child.stdin.as_mut().unwrap().flush().unwrap();
+        let started = Instant::now();
+        while !root.join(CHILD_ARMED).is_file() {
+            if let Some(status) = child.try_wait().expect("inspect armed child") {
+                let mut stderr = String::new();
+                if let Some(mut stream) = child.stderr.take() {
+                    let _ = stream.read_to_string(&mut stderr);
+                }
+                let detail = format!(
+                    "child exited before real pipe ARM/ACK: status={status} stderr={stderr}"
+                );
+                fs::write(root.join(LAUNCHER_ERROR), &detail).unwrap();
+                panic!("{detail}");
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "writer did not acknowledge actual private pipe byte"
+            );
+            thread::sleep(Duration::from_millis(30));
+        }
+        assert!(
+            !root.join(CHILD_EOF).exists(),
+            "writer saw EOF before the launcher was hard-killed"
+        );
+        publish_test_marker(
+            &root.join(PARENT_READY),
+            child.id().to_string().as_bytes(),
+        )
+        .expect("sync launcher-ready marker before publishing");
+
+        // Remain alive and keep the writer-side stdin handle open. The
+        // grandparent must kill this OS process rather than sending CLOSE.
+        let started = Instant::now();
+        loop {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "writer unexpectedly exited while launcher remained alive"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "launcher was not hard-killed by the grandparent"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    struct KillLauncherOnDrop(Child);
+    impl Drop for KillLauncherOnDrop {
+        fn drop(&mut self) {
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("staya-g2-05h3b-{}-{unique}", std::process::id()));
+    assert!(!root.exists(), "never reuse a private store directory");
+    fs::create_dir(&root).expect("create disposable receiver directory");
+    let mut launcher = KillLauncherOnDrop(
+        Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .arg("--nocapture")
+            .env(PARENT_ENV, &root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("launch parent-of-owner process"),
+    );
+
+    let started = Instant::now();
+    while !root.join(PARENT_READY).is_file() {
+        if let Some(status) = launcher.0.try_wait().expect("inspect launcher process") {
+            let detail = fs::read_to_string(root.join(LAUNCHER_ERROR))
+                .unwrap_or_else(|e| format!("no launcher diagnostic marker: {e}"));
+            panic!("launcher died before verified actor ARM: status={status}; {detail}");
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(80),
+            "launcher's child never reached real FsStore-ready state"
+        );
+        thread::sleep(Duration::from_millis(30));
+    }
+    let child_pid: u32 = fs::read_to_string(root.join(PARENT_READY))
+        .unwrap()
+        .parse()
+        .expect("grandparent must observe real child PID");
+    assert!(child_pid > 0);
+    assert!(
+        root.join(CHILD_ARMED).exists(),
+        "real pipe ARM must be observed"
+    );
+    assert!(
+        !root.join(CHILD_EOF).exists(),
+        "pipe must not report EOF while parent remains alive"
+    );
+    let competing_owner = StoreLease::acquire(&root);
+    assert!(
+        matches!(
+            &competing_owner,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock
+        ),
+        "real pinned FsStore child must exclude a second writer before parent death:          child_pid={child_pid} competing_owner={competing_owner:?}          armed={} eof={}",
+        root.join(CHILD_ARMED).exists(),
+        root.join(CHILD_EOF).exists(),
+    );
+
+    // Linux SIGKILL / Windows TerminateProcess: no Rust Drop, no explicit
+    // CLOSE message, no guarantee that the worker's unsynced Bao survived.
+    launcher.0.kill().expect("force-kill actual parent process");
+    let ended = launcher.0.wait().expect("reap killed parent process");
+    assert!(!ended.success(), "launcher must not exit cleanly");
+
+    let started = Instant::now();
+    while !root.join(CHILD_EOF).is_file() {
+        assert!(
+            started.elapsed() < Duration::from_secs(65),
+            "orphaned writer failed to recognize loss of its only pipe writer"
+        );
+        thread::sleep(Duration::from_millis(30));
+    }
+    let observed = fs::read_to_string(root.join(CHILD_EOF)).unwrap();
+    assert_eq!(observed, "EOF_NO_CLEAN_ACK");
+
+    // Wait is only test observation of OS process cleanup, not a production
+    // retry policy or an excuse to swallow WouldBlock. The independent
+    // owner must still acquire a real lock and read only candidate metadata.
+    let started = Instant::now();
+    let mut observed_busy = 0usize;
+    let owner = loop {
+        match StoreLease::acquire(&root) {
+            Ok(owner) => break owner,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                observed_busy += 1;
+                assert!(
+                    started.elapsed() < Duration::from_secs(30),
+                    "writer child retained OS custody after failed-control exit"
+                );
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => panic!("unexpected independent reacquisition error: {e}"),
+        }
+    };
+    owner
+        .validate_fence()
+        .expect("cold owner must validate physical root");
+    let payload = make_data();
+    let (identity, _) = prepare(&payload);
+    assert!(
+        read_candidates(
+            &owner,
+            identity.manifest.id.0,
+            identity.manifest.size,
+            IROH_PREORDER_16K,
+        )
+        .unwrap()
+        .is_empty(),
+        "loss of launcher must never mint an authenticated checkpoint"
+    );
+    drop(owner);
+    drop(launcher); // parent process already reaped
+    fs::remove_dir_all(root).expect("remove private CI fixture only");
+    println!(
+        "STY_G2_05H3B real_fsstore=true parent_hard_killed=true \
+         orphan_saw_eof=true clean_ack=false checkpoint=false \
+         child_pid={child_pid} independent_owner=true busy_observations={observed_busy} \
+         authenticated_ipc=false production_supervisor=false file_gate=false"
+    );
+}

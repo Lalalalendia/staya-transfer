@@ -75,6 +75,10 @@ jobs:
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_os_process_supervisor_clean_and_kill --nocapture
+      - name: STY-G2-05h3b real parent hard-kill and orphaned FsStore owner
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_parent_death_fails_closed_without_clean_ack --nocapture
       - name: STY-G2-06c real Linux SIGKILL followed by safe direct QUIC recovery
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
