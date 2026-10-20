@@ -71,6 +71,10 @@ jobs:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
           STY_G2_06B_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/resume
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_network_get -- --exact real_second_quic_get_stages_only_unverified_bytes --nocapture
+      - name: STY-G2-05h3a real FsStore OS worker clean join and forced kill
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_os_process_supervisor_clean_and_kill --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
