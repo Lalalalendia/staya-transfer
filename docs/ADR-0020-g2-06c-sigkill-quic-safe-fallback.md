@@ -12,3 +12,7 @@ Two independent real Linux receiver-process modes are tested with the same local
 **Strict exclusions:** this is SIGKILL/process-exit evidence, not power-loss durability, crash at every barrier, multihost/WAN/relay, hostile races or adversarial path custody, Windows directory durability, Akula grants/Vault/File Gate, any durable APPLIED acknowledgment, or full G2-06 release. Worker subprocess is a disposable test harness, not the accepted G2-05h3a supervisor. Linux OS lock #17 remains a separate dependency, as do G2-05h2/#24 and h3a/#27. If the standalone test fails, keep G2-06 and this PR on HOLD.
 
 **Acceptance for this narrow PR:** exact-head Linux pinned release and fork --locked, two actual post-kill QUIC scenarios, at least three raw GET proofs per mode, full trusted BLAKE3, byte-for-byte cross-variant evidence and no false retained-range skip. No green status until CI proves it.
+
+## Writer-custody review refinement
+
+The pre-kill competing `StoreLease::acquire` assertion checks specifically for `io::ErrorKind::WouldBlock`, not any unrelated filesystem failure. On the `uncommitted` safe full-retry path, the destination is a **new** physical FsStore root, so an independent `StoreLease` is acquired and retained until its actor shuts down. Holding custody for the killed root alone does not authorize writing to the fallback root. The test explicitly confirms another cooperative writer gets `WouldBlock` for that fresh root. This closes a test-only ownership gap; it does not prove adversarial path safety or a production G2-06 session supervisor.

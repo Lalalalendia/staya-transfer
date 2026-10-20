@@ -708,8 +708,11 @@ async fn linux_killed_receiver_redownloads_uncommitted_or_resumes_verified() {
             }
             assert_eq!(fs::read_to_string(&ready).unwrap(), mode);
             assert!(
-                StoreLease::acquire(&receiver_dir).is_err(),
-                "parent must not own receiver storage while child is alive"
+                matches!(
+                    StoreLease::acquire(&receiver_dir),
+                    Err(ref error) if error.kind() == io::ErrorKind::WouldBlock
+                ),
+                "live receiver must exclude a second writer specifically with WouldBlock"
             );
             process.0.kill().expect("deliver real OS SIGKILL");
             let exit = process.0.wait().expect("reap killed receiver");
@@ -773,12 +776,23 @@ async fn linux_killed_receiver_redownloads_uncommitted_or_resumes_verified() {
             }
             // Uncommitted partial contents are quarantined by choosing an
             // entirely new private FsStore root, never the crashed root.
-            let destination = if permitted_skip {
-                receiver_dir.clone()
+            let (destination, fresh_owner) = if permitted_skip {
+                (receiver_dir.clone(), None)
             } else {
                 let path = base.join("fresh-uncommitted");
                 fs::create_dir(&path).unwrap();
-                path
+                // The full-retry destination is a *different* physical root.
+                // Owning the killed root does not authorize this new writer.
+                let fresh_lease = StoreLease::acquire(&path)
+                    .expect("full-retry destination must have independent OS custody");
+                assert!(
+                    matches!(
+                        StoreLease::acquire(&path),
+                        Err(ref error) if error.kind() == io::ErrorKind::WouldBlock
+                    ),
+                    "a second writer must be excluded from the fresh retry root"
+                );
+                (path, Some(fresh_lease))
             };
             let receiver = FsStore::load(&destination)
                 .await
@@ -813,6 +827,7 @@ async fn linux_killed_receiver_redownloads_uncommitted_or_resumes_verified() {
             next.close(0u8.into(), b"verified post-kill transfer");
             receiver.shutdown().await.unwrap();
             drop(receiver);
+            drop(fresh_owner);
 
             if let Some(dest) = std::env::var_os("STY_G2_06C_OUTPUT_DIR") {
                 let dir = PathBuf::from(dest);
