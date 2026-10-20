@@ -16,7 +16,7 @@ fn main() {
     // acquire StoreLease. No attacker-supplied executable is accepted as proof.
     if mode == "arm-hold" {
         let mut arm = [0u8; 1];
-        if io::stdin().read_exact(&mut arm).is_err() || arm != [b'A'] {
+        if io::stdin().read_exact(&mut arm).is_err() || arm != *b"A" {
             process::exit(8);
         }
     }
