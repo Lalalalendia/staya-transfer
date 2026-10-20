@@ -546,7 +546,9 @@ mod tests {
             .unwrap()
             .into_cursor();
         completed.record_verified_staging(a.manifest, b"a").unwrap();
-        completed.record_verified_staging(b.manifest, b"bb").unwrap();
+        completed
+            .record_verified_staging(b.manifest, b"bb")
+            .unwrap();
         let done = completed.verified_staging_progress();
         assert_eq!(done.phase, QueuePhase::Complete);
         assert_eq!(done.verified_staged_items, 2);
