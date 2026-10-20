@@ -60,6 +60,8 @@ jobs:
         env:
           STY_G1F_OUTPUT_DIR: ${{ github.workspace }}/g1f-private-preview
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_manual_direct_file_two_os_processes_and_unlisted_peer_denied --nocapture
+      - name: STY-G1i Windows QUIC reconnect, root and bytes verified
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact manual_preview_reconnects_real_quic_after_forced_close --nocapture
       - uses: actions/upload-artifact@v4
         with:
           name: windows-direct-preview-${{ matrix.variant }}
