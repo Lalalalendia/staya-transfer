@@ -29,6 +29,8 @@ jobs:
         run: cargo fmt --manifest-path native-host/Cargo.toml --all -- --check
       - name: Real Linux OS hard-kill, pidfd exit and wrong-parent tests
         run: cargo test --manifest-path native-host/Cargo.toml --locked --all-targets -- --nocapture
+      - name: STY-G2-05h3g1 actual SO_PEERCRED ARM and parent SIGKILL
+        run: cargo test --manifest-path native-host/Cargo.toml --locked --test ipc_auth -- --nocapture
       - name: Strict native syscall lint
         run: cargo clippy --manifest-path native-host/Cargo.toml --locked --all-targets -- -D warnings
   rust-191-compat:
