@@ -48,6 +48,32 @@ type YDBDocumentDenialAnchor struct {
 
 var _ TrustedDenialAnchor = (*YDBDocumentDenialAnchor)(nil)
 
+// YDBDocumentDenialReader is a deliberately weaker READ-ONLY capability.
+// It does not expose CompareAndSeal. Deploy it using an IAM principal with
+// independently VERIFIED read-only YDB permissions (for example ydb.viewer
+// scoped to the intended database). Merely using this Go type cannot restrict
+// a privileged IAM token holder from issuing API requests by other means.
+type YDBDocumentDenialReader struct {
+	client *YDBDocumentDenialAnchor
+}
+
+var _ DenialAnchorReader = (*YDBDocumentDenialReader)(nil)
+
+func NewYDBDocumentDenialReader(endpoint, table string, token IAMTokenSource) (*YDBDocumentDenialReader, error) {
+	client, err := NewYDBDocumentDenialAnchor(endpoint, table, token)
+	if err != nil {
+		return nil, ErrAnchorHold
+	}
+	return &YDBDocumentDenialReader{client: client}, nil
+}
+
+func (r *YDBDocumentDenialReader) Read(ctx context.Context, installation, vault [16]byte) (DenialCheckpoint, error) {
+	if r == nil || r.client == nil {
+		return DenialCheckpoint{}, ErrAnchorHold
+	}
+	return r.client.Read(ctx, installation, vault)
+}
+
 // The production factory restricts credentials to the documented YDB host.
 // Only a preprovisioned document table with HASH Installation and RANGE Vault
 // keys is supported. A custom HTTP transport is NOT exposed to product code.

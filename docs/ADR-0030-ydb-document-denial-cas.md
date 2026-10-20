@@ -51,3 +51,85 @@ GitHub CI executes the tests on Windows and Linux. No cloud credentials, externa
 4. Bind future **complete positive + negative grant policy**, trusted QUIC identity and broker permissions; current DENY-only commitment is insufficient for grants. Verify real two-machine physical deployment and File Gate separately.
 
 `CONSISTENT_DENIAL_ONLY` never implies `ALLOW`, `APPLIED`, ACK, File Gate write or P2P entitlement. Main and installed Akula remain untouched.
+
+## RN-4E1b-03c1b7 — operator-controlled live read-only preflight
+
+This incremental stage does **not** provision YDB or add any mutation rights. It
+introduces `YDBDocumentDenialReader`, an exported `DenialAnchorReader` with only
+`Read`, and an opt-in `TestYDBLiveReadOnlyPreflight` that can check a separately
+created **real YDB** row without changing it. The embedded HTTP client still
+sends `GetItem(ConsistentRead=true)` to the pinned YDB HTTPS endpoint. The test
+compares the entire remote checkpoint with independently supplied expected
+Installation/Vault, exact global Epoch, DENY-map digest and locally recomputed
+commitment; any mismatch or timeout is `HOLD`.
+
+**No cloud test was executed during development.** CI deliberately reports the
+real-cloud case as `SKIP` when `STY_YDB_LIVE_READ` is not `1`. Passing the
+ordinary CI suite proves local mocks and compile-time method separation, NOT
+external YDB availability, IAM restrictions, or nonrollbackable storage.
+
+### Controlled live invocation
+
+Run this from a dedicated operator-controlled host, outside the Akula desktop
+and outside untrusted PR CI. Independently provision a disposable YDB **document
+api** row with the exact six canonical attributes required by this ADR.
+Provision a distinct read-only IAM service account, ideally `ydb.viewer` scoped
+to this database, with no inherited editor/admin role. Store a short-lived IAM
+token in a private file **outside the repository**; on Unix the mode must be
+owner-readable only (e.g. `0600`). On Windows the operator must verify the
+native file DACL separately; POSIX mode alone does not prove Windows custody.
+Do not copy or paste credentials into GitHub issues, workflows, CLI arguments,
+terminal logs or this document.
+
+Set the following environment variables (placeholders are not credentials):
+
+```text
+STY_YDB_LIVE_READ=1
+STY_YDB_LIVE_ENDPOINT=https://docapi.serverless.yandexcloud.net/ru-central1/<folder-id>/<database-id>
+STY_YDB_LIVE_TABLE=<preprovisioned/table>
+STY_YDB_LIVE_INSTALLATION=<32-lowercase-hex-characters>
+STY_YDB_LIVE_VAULT=<32-lowercase-hex-characters>
+STY_YDB_LIVE_EPOCH=<canonical-unsigned-decimal>
+STY_YDB_LIVE_DENY_DIGEST=<64-lowercase-hex-characters>
+STY_YDB_LIVE_IAM_TOKEN_FILE=<absolute-private-token-file>
+```
+
+Then run from `interop/owner-witness-lab`:
+
+```bash
+go test -count=1 -run '^TestYDBLiveReadOnlyPreflight$' -v .
+```
+
+A real `PASS` means the expected **DENY-only** checkpoint was found with a
+strongly consistent read. It is **not** a capability to write, a grant, or a
+security proof against malicious administrators. Missing opt-in prints `SKIP`,
+missing configuration fails, and invalid secrets or remote state fail closed.
+The preflight does not call `UpdateItem`, `PutItem`, `DeleteItem`, or create a
+row. No automatic retry is performed.
+
+### IAM privileges are a separate P0 gate
+
+Per the provider's current documented roles, `ydb.viewer` permits reads, while
+`ydb.editor` also permits **writes, database/schema management and backup
+restoration**. Giving the writer this role is NOT equivalent to granting only
+conditional `UpdateItem`: a holder of those credentials could issue a
+different request or restore an older row, bypassing this Go adapter's rules.
+The YDB service's `ConsistentRead` and conditional CAS cannot correct that.
+A production writer must be a separately operated, authenticated service that
+validates a complete monotonic policy transition under enforced credentials,
+with an independent antirollback source, immutable audit or verified hardware
+root; do not expose YDB write credentials to Akula or to an untrusted peer.
+Verify real roles with an independently administered permission audit and
+negative sandbox tests before any release approval.
+
+References:
+- https://yandex.cloud/en/docs/ydb/security/
+- https://yandex.cloud/en/docs/ydb/docapi/api-ref/actions/getItem
+- https://yandex.cloud/en/docs/ydb/docapi/api-ref/actions/updateItem
+- https://ydb.tech/docs/en/yql/reference/syntax/grant
+
+**Release gates still open:** full positive+negative policy root, remote
+nonrollbackable checkpoint against privileged restore, two independent physical
+hosts, live IAM read-only evidence, remote conditional update under constrained
+operator policy, loss-of-power validation and Akula File Gate authorization.
+No P2P grants, APPLIED, ACK or installed product changes.

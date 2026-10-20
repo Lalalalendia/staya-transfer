@@ -6,10 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -365,4 +368,181 @@ func TestYDBConfigurationAndCredentialsAreFailClosed(t *testing.T) {
 	if count != 0 {
 		t.Fatal("invalid token still sent HTTP request")
 	}
+}
+
+// Regression: the reader's public method set cannot satisfy a sealing port.
+// The same HTTPS fixture proves that reader preflight causes GetItem only.
+func TestYDBReaderIsReadOnlyCapability(t *testing.T) {
+	h := fixtureHead(t)
+	full, state := newYDBFixture(t, h)
+	reader := &YDBDocumentDenialReader{client: full}
+	if _, ok := any(reader).(TrustedDenialAnchor); ok {
+		t.Fatal("read-only YDB adapter unexpectedly exposes CAS")
+	}
+	expected, err := checkpointFor(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reader.Read(context.Background(), h.Installation, h.Vault)
+	if err != nil || got != expected {
+		t.Fatalf("read-only preflight HOLD: %v", err)
+	}
+	state.mu.Lock()
+	reads, writes := state.totalGet, state.totalUpdate
+	state.mu.Unlock()
+	if reads != 1 || writes != 0 {
+		t.Fatalf("preflight mutated record: gets=%d updates=%d", reads, writes)
+	}
+	if _, err := (*YDBDocumentDenialReader)(nil).Read(context.Background(), h.Installation, h.Vault); !errors.Is(err, ErrAnchorHold) {
+		t.Fatal("nil reader did not fail closed")
+	}
+	if _, err := NewYDBDocumentDenialReader("https://evil.example/db", "test/epoch", func(context.Context) (string, error) { return "test-token", nil }); !errors.Is(err, ErrAnchorHold) {
+		t.Fatal("untrusted reader endpoint accepted")
+	}
+}
+
+// readYDBProbeToken keeps IAM credentials out of command-line arguments and
+// logs. It rejects symlinks, nonregular files and accessible Unix secrets.
+// Operators must separately protect all parent directories and on Windows
+// must verify native ACLs: os.FileMode does not describe Windows DACLs.
+func readYDBProbeToken(ctx context.Context, path string) (string, error) {
+	if ctx == nil || ctx.Err() != nil || path == "" {
+		return "", ErrAnchorHold
+	}
+	prior, err := os.Lstat(path)
+	if err != nil || !prior.Mode().IsRegular() || prior.Size() < 1 || prior.Size() > 16384 {
+		return "", ErrAnchorHold
+	}
+	if runtime.GOOS != "windows" && prior.Mode().Perm()&0077 != 0 {
+		return "", ErrAnchorHold
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", ErrAnchorHold
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(prior, opened) {
+		return "", ErrAnchorHold
+	}
+	buf, err := io.ReadAll(io.LimitReader(f, 16385))
+	if err != nil || len(buf) < 1 || len(buf) > 16384 || ctx.Err() != nil {
+		return "", ErrAnchorHold
+	}
+	token := strings.TrimSuffix(string(buf), "\n")
+	if token == "" || token != strings.TrimSpace(token) {
+		return "", ErrAnchorHold
+	}
+	for i := 0; i < len(token); i++ {
+		if token[i] <= 32 || token[i] >= 127 {
+			return "", ErrAnchorHold
+		}
+	}
+	return token, nil
+}
+
+func TestYDBProbeTokenFileRejectsUnsafeInputs(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "iam-token")
+	if err := os.WriteFile(good, []byte("dummy-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readYDBProbeToken(context.Background(), good)
+	if err != nil || got != "dummy-token" {
+		t.Fatalf("valid local token file unavailable: %v", err)
+	}
+	if _, err = readYDBProbeToken(context.Background(), filepath.Join(dir, "missing")); !errors.Is(err, ErrAnchorHold) {
+		t.Fatal("missing token file accepted")
+	}
+	if _, err = readYDBProbeToken(context.Background(), dir); !errors.Is(err, ErrAnchorHold) {
+		t.Fatal("directory token accepted")
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(good, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = readYDBProbeToken(context.Background(), good); !errors.Is(err, ErrAnchorHold) {
+			t.Fatal("group-readable credential accepted")
+		}
+		if err := os.Chmod(good, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		link := filepath.Join(dir, "token-link")
+		if err := os.Symlink(good, link); err == nil {
+			if _, err := readYDBProbeToken(context.Background(), link); !errors.Is(err, ErrAnchorHold) {
+				t.Fatal("symlink credential accepted")
+			}
+		}
+	}
+	if err := os.WriteFile(good, []byte("dummy\r\ninjection"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = readYDBProbeToken(context.Background(), good); !errors.Is(err, ErrAnchorHold) {
+		t.Fatal("header injection token accepted")
+	}
+	if err := os.WriteFile(good, []byte(strings.Repeat("z", 16385)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = readYDBProbeToken(context.Background(), good); !errors.Is(err, ErrAnchorHold) {
+		t.Fatal("oversized token accepted")
+	}
+}
+
+// This is an explicitly opt-in REAL YDB READ, NOT a CI proof. No writes,
+// no auto-provisioning and no cached fallback. No secrets or remote data logged.
+// All STY_YDB_LIVE_* inputs are required when STY_YDB_LIVE_READ=1.
+func TestYDBLiveReadOnlyPreflight(t *testing.T) {
+	if os.Getenv("STY_YDB_LIVE_READ") != "1" {
+		t.Skip("NOT RUN: requires separately provisioned real YDB database and viewer IAM principal")
+	}
+	required := []string{"STY_YDB_LIVE_ENDPOINT", "STY_YDB_LIVE_TABLE", "STY_YDB_LIVE_INSTALLATION", "STY_YDB_LIVE_VAULT", "STY_YDB_LIVE_EPOCH", "STY_YDB_LIVE_DENY_DIGEST", "STY_YDB_LIVE_IAM_TOKEN_FILE"}
+	for _, name := range required {
+		if os.Getenv(name) == "" {
+			t.Fatalf("HOLD: missing required field %s", name)
+		}
+	}
+	parse16 := func(key string) [16]byte {
+		var v [16]byte
+		decoded, ok := canonicalHex(os.Getenv(key), 16)
+		if !ok {
+			t.Fatalf("HOLD: malformed %s", key)
+		}
+		copy(v[:], decoded)
+		if v == [16]byte{} {
+			t.Fatalf("HOLD: zero %s", key)
+		}
+		return v
+	}
+	inst, vault := parse16("STY_YDB_LIVE_INSTALLATION"), parse16("STY_YDB_LIVE_VAULT")
+	epoch, err := strconv.ParseUint(os.Getenv("STY_YDB_LIVE_EPOCH"), 10, 64)
+	if err != nil || strconv.FormatUint(epoch, 10) != os.Getenv("STY_YDB_LIVE_EPOCH") {
+		t.Fatal("HOLD: invalid canonical epoch")
+	}
+	digest, ok := canonicalHex(os.Getenv("STY_YDB_LIVE_DENY_DIGEST"), 32)
+	if !ok {
+		t.Fatal("HOLD: invalid canonical DENY digest")
+	}
+	var h Head
+	h.Installation, h.Vault, h.Epoch = inst, vault, epoch
+	copy(h.DenyDigest[:], digest)
+	expected, err := checkpointFor(h)
+	if err != nil {
+		t.Fatal("HOLD: invalid expected checkpoint")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	source := func(requestCtx context.Context) (string, error) {
+		return readYDBProbeToken(requestCtx, os.Getenv("STY_YDB_LIVE_IAM_TOKEN_FILE"))
+	}
+	reader, err := NewYDBDocumentDenialReader(os.Getenv("STY_YDB_LIVE_ENDPOINT"), os.Getenv("STY_YDB_LIVE_TABLE"), source)
+	if err != nil {
+		t.Fatal("HOLD: invalid YDB live reader configuration")
+	}
+	got, err := reader.Read(ctx, inst, vault)
+	if err != nil || got != expected {
+		t.Fatal("HOLD: live strongly-consistent YDB checkpoint absent or divergent")
+	}
+	t.Log("LIVE YDB READ-ONLY PREFLIGHT: DENY checkpoint matches; no authorization or CAS granted")
 }
