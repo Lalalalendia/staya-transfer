@@ -93,6 +93,46 @@ jobs:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
           STY_G2_06G2_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/fsstore-cuts
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_phase_sigkill_requires_independent_root_proof --nocapture
+      - name: STY-G2-06h kernel ENOSPC in actual FsStore IO (Linux tmpfs)
+        shell: bash
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          if ! command -v strace >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq strace
+          fi
+          mount_root="${RUNNER_TEMP}/staya-g2-06h-${STY_INTEROP_VARIANT}"
+          mkdir -p "$mount_root"
+          sudo mount -t tmpfs -o size=32m,mode=0700 tmpfs "$mount_root"
+          cleanup() { sudo umount "$mount_root"; rmdir "$mount_root"; }
+          trap cleanup EXIT
+          sudo chown "$(id -u):$(id -g)" "$mount_root"
+          test "$(stat -f -c %T "$mount_root")" = "tmpfs"
+          mkdir -p "$mount_root/receiver" "${GITHUB_WORKSPACE}/enospc-trace" "${GITHUB_WORKSPACE}/wire-artifact/enospc"
+          export STY_G2_06H_ROOT="$mount_root/receiver"
+          export STY_G2_06H_OUTPUT_DIR="${GITHUB_WORKSPACE}/wire-artifact/enospc"
+          cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_enospc_gate --no-run
+          strace -ff -yy -s 80 -e trace=pwrite64,pwritev,write,writev \
+            -o "${GITHUB_WORKSPACE}/enospc-trace/io" \
+            cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_enospc_gate \
+              -- --exact real_fsstore_enospc_rejects_writer_and_cold_restart --nocapture
+          if ! grep -hE '(pwrite64|pwritev|write|writev)\(.*\.(data|obao4|sizes4)>.*= -1 ENOSPC' \
+                "${GITHUB_WORKSPACE}"/enospc-trace/io.* \
+                > "${GITHUB_WORKSPACE}/wire-artifact/enospc/actor-syscall-proof.log"; then
+            echo 'ERROR: actual FsStore sidecar syscall ENOSPC absent' >&2
+            exit 1
+          fi
+          printf 'fsstore_sidecar_write_enospc=true\n' > "${GITHUB_WORKSPACE}/wire-artifact/enospc/actor-errno.txt"
+      - name: Preserve raw FsStore ENOSPC syscall traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: g2-enospc-syscalls-${{ matrix.variant }}
+          path: enospc-trace/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
@@ -155,4 +195,7 @@ jobs:
           echo STY_G2_06C_RELEASE_FORK_SIGKILL_SAFE_FALLBACK_WIRE_IDENTICAL=true
           cmp wire-output/wire-release/fsstore-cuts/inventory.txt wire-output/wire-fork/fsstore-cuts/inventory.txt
           echo STY_G2_06G2_RELEASE_FORK_ACTOR_CUTS_IDENTICAL=true
+          cmp wire-output/wire-release/enospc/inventory.txt wire-output/wire-fork/enospc/inventory.txt
+          cmp wire-output/wire-release/enospc/actor-errno.txt wire-output/wire-fork/enospc/actor-errno.txt
+          echo STY_G2_06H_RELEASE_FORK_REAL_ENOSPC_IDENTICAL=true
           echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true
