@@ -23,12 +23,12 @@ use std::{path::Path, process::Command, sync::atomic::AtomicBool, time::Duration
 /// An affine experimental owner; no raw registry/actor is returned to callers.
 pub struct RegisteredActiveFsStore {
     active: ActiveFsStore,
-    writers: WriterProcessRegistry,
+    writers: Box<WriterProcessRegistry>,
 }
 
 pub struct RegisteredClosingFsStore {
     closing: ClosingFsStore,
-    writers: WriterProcessRegistry,
+    writers: Box<WriterProcessRegistry>,
     joined: bool,
 }
 
@@ -39,8 +39,10 @@ pub struct RegisteredQuiescentFsStore {
 
 impl RegisteredActiveFsStore {
     pub async fn open(root: &Path, limits: Limits, max_children: usize) -> Result<Self, String> {
-        let writers = WriterProcessRegistry::new(max_children)
-            .map_err(|e| format!("create bounded OS child registry: {e}"))?;
+        let writers = Box::new(
+            WriterProcessRegistry::new(max_children)
+                .map_err(|e| format!("create bounded OS child registry: {e}"))?,
+        );
         let active = ActiveFsStore::open(root, limits).await?;
         Ok(Self { active, writers })
     }
