@@ -1046,20 +1046,37 @@ async fn windows_terminated_receiver_requires_new_full_quic_transfer() {
         let second_connection = client.connect(address, iroh_blobs::ALPN)
             .await
             .expect("second authenticated direct QUIC connection");
-        // A full-object request is deliberately rejected by Staya's 1 MiB
-        // per-range admission limit. Preserve that guard: safely fetch ALL
-        // bytes in separate, bounded 16 KiB-aligned Bao groups instead.
+        // TransferRequest::new checks geometry, not bandwidth. The actual
+        // one-MiB gates are the planner's budget and Bao verifier. A full
+        // object must be fetched in individually bounded Bao-aligned groups.
         let cap = staya_transfer::planner::MAX_PLANNED_RANGE_BYTES;
         assert_eq!(cap % (16 * 1024), 0);
         assert!(manifest.size > cap, "exercise the full-download budget boundary");
+        let oversized = TransferRequest::new(
+            manifest,
+            ByteRange::new(0, manifest.size, manifest.size).unwrap(),
+        )
+        .expect("geometry is valid; the Bao budget gate must reject it");
         assert!(
-            TransferRequest::new(
-                manifest,
-                ByteRange::new(0, manifest.size, manifest.size).unwrap()
-            )
-            .is_err(),
-            "one oversized GET must remain forbidden"
+            matches!(
+                verify_bao_range(&oversized, &[]),
+                Err(TransferError::InvalidBudget)
+            ),
+            "oversized Bao range must be rejected before decoding"
         );
+        let empty = staya_transfer::planner::VerifiedCheckpoint::empty(manifest);
+        assert!(matches!(
+            staya_transfer::planner::MissingRanges::from_checkpoint(
+                manifest,
+                &empty,
+                staya_transfer::TransferBudget {
+                    max_inflight_bytes: cap + 1,
+                    max_sources: 1,
+                    max_retries: 0,
+                }
+            ),
+            Err(TransferError::InvalidBudget)
+        ));
         let requested = [(0, cap), (cap, manifest.size)];
         let quota = SharedAdmission::new(Limits {
             max_partial_objects: 1,
