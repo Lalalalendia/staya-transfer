@@ -117,7 +117,7 @@ fn operation(
     handle: RawHandle,
     deadline: Instant,
     pipe_connected_is_success: bool,
-    begin: impl FnOnce(*mut Overlapped, *mut u32) -> i32,
+    begin: impl FnOnce(*mut Overlapped) -> i32,
 ) -> io::Result<u32> {
     let event = Event::create()?;
     let mut overlapped = Overlapped {
@@ -136,8 +136,7 @@ fn operation(
         },
         "Win32 OVERLAPPED FFI layout mismatch"
     );
-    let mut first_bytes = 0u32;
-    let completed = begin(&mut overlapped, &mut first_bytes);
+    let completed = begin(&mut overlapped);
     if completed != 0 {
         return completed_bytes(handle, &mut overlapped);
     }
@@ -177,7 +176,7 @@ fn operation(
 }
 
 pub fn connect(handle: RawHandle, deadline: Instant) -> io::Result<()> {
-    operation(handle, deadline, true, |overlapped, _| {
+    operation(handle, deadline, true, |overlapped| {
         // SAFETY: overlapped is live through kernel completion, handle is a
         // server named pipe created with FILE_FLAG_OVERLAPPED.
         unsafe { ConnectNamedPipe(handle, overlapped) }
@@ -189,15 +188,16 @@ pub fn read_exact(handle: RawHandle, mut bytes: &mut [u8], deadline: Instant) ->
     while !bytes.is_empty() {
         let length = u32::try_from(bytes.len())
             .map_err(|_| io::Error::other("overlapped read frame oversized"))?;
-        let n = operation(handle, deadline, false, |overlapped, received| {
-            // SAFETY: borrowed mutable buffer remains stable until operation()
-            // confirms completion or aborts the whole process.
+        let n = operation(handle, deadline, false, |overlapped| {
+            // SAFETY: the async ReadFile byte-count pointer is NULL per Win32
+            // API contract. The buffer remains live until GetOverlappedResult
+            // confirms completion or the whole lab process aborts.
             unsafe {
                 ReadFile(
                     handle,
                     bytes.as_mut_ptr().cast(),
                     length,
-                    received,
+                    std::ptr::null_mut(),
                     overlapped,
                 )
             }
@@ -218,10 +218,10 @@ pub fn write_all(handle: RawHandle, mut bytes: &[u8], deadline: Instant) -> io::
     while !bytes.is_empty() {
         let length = u32::try_from(bytes.len())
             .map_err(|_| io::Error::other("overlapped write frame oversized"))?;
-        let n = operation(handle, deadline, false, |overlapped, written| {
+        let n = operation(handle, deadline, false, |overlapped| {
             // SAFETY: immutable borrowed buffer stays live and unmoved until
             // the kernel returns a completed result or the process aborts.
-            unsafe { WriteFile(handle, bytes.as_ptr().cast(), length, written, overlapped) }
+            unsafe { WriteFile(handle, bytes.as_ptr().cast(), length, std::ptr::null_mut(), overlapped) }
         })? as usize;
         if n == 0 || n > bytes.len() {
             return Err(io::Error::new(
