@@ -50,12 +50,22 @@ func checkpointFor(head Head) (DenialCheckpoint, error) {
 // durable CAS and antirollback against the specified attacker. Read must be a
 // fresh authority read (not an eventually consistent or cached copy). Both
 // methods must fail closed when availability / identity cannot be established.
-type TrustedDenialAnchor interface {
+// DenialAnchorReader holds no mutation authority. An authenticated quorum of
+// remote signers can implement only this interface; it cannot be passed to
+// AppendOwnerDenyWithAnchor, which requires a separate sealing capability.
+type DenialAnchorReader interface {
 	Read(ctx context.Context, installation, vault [16]byte) (DenialCheckpoint, error)
+}
+
+// TrustedDenialAnchor is a stronger, separately provisioned mutation port.
+// A caller must NEVER promote a read-only witness to this capability by
+// wrapping a rejected CAS in a no-op: the journal is written before sealing.
+type TrustedDenialAnchor interface {
+	DenialAnchorReader
 	CompareAndSeal(ctx context.Context, expected, next DenialCheckpoint) error
 }
 
-func compareAnchoredState(ctx context.Context, anchor TrustedDenialAnchor, local Head) (DenialCheckpoint, error) {
+func compareAnchoredState(ctx context.Context, anchor DenialAnchorReader, local Head) (DenialCheckpoint, error) {
 	if anchor == nil || ctx == nil || ctx.Err() != nil {
 		return DenialCheckpoint{}, ErrAnchorHold
 	}
@@ -74,7 +84,7 @@ func compareAnchoredState(ctx context.Context, anchor TrustedDenialAnchor, local
 // while comparing the ENTIRE ledger and a fresh independent checkpoint.
 // The only meaning of a returned Head is "DENY snapshot agrees". It does not
 // authorize an endpoint, file write, token, peer or replication operation.
-func ReadAnchoredDenialHead(ctx context.Context, path string, installation, vault [16]byte, anchor TrustedDenialAnchor) (Head, error) {
+func ReadAnchoredDenialHead(ctx context.Context, path string, installation, vault [16]byte, anchor DenialAnchorReader) (Head, error) {
 	if anchor == nil || ctx == nil || ctx.Err() != nil {
 		return Head{}, ErrAnchorHold
 	}
@@ -96,7 +106,7 @@ func ReadAnchoredDenialHead(ctx context.Context, path string, installation, vaul
 // AnchoredDenialLoader can be used with the existing signed TLS Handler:
 // the handler MUST NOT sign a journal which is missing, behind, ahead of, or
 // inconsistent with the independent provider. It still signs no grant.
-func AnchoredDenialLoader(ctx context.Context, path string, installation, vault [16]byte, anchor TrustedDenialAnchor) func() (Head, error) {
+func AnchoredDenialLoader(ctx context.Context, path string, installation, vault [16]byte, anchor DenialAnchorReader) func() (Head, error) {
 	return func() (Head, error) { return ReadAnchoredDenialHead(ctx, path, installation, vault, anchor) }
 }
 
