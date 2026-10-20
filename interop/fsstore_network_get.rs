@@ -105,6 +105,13 @@ async fn bounded_wire_get(
     hash: Hash,
     range: std::ops::Range<u64>,
 ) -> Result<Vec<u8>, String> {
+    // The private wire harness must not bypass the same range ceiling as the
+    // planner and Bao decoder, even when called directly by a test.
+    if range.start >= range.end
+        || range.end - range.start > staya_transfer::planner::MAX_PLANNED_RANGE_BYTES
+    {
+        return Err("GET exceeds Staya's 1 MiB per-range budget".to_owned());
+    }
     let get = GetRequest::blob_ranges(hash, ChunkRanges::bytes(range));
     let request = postcard::to_stdvec(&Request::Get(get))
         .map_err(|e| format!("serialize get request: {e}"))?;
@@ -1077,6 +1084,13 @@ async fn windows_terminated_receiver_requires_new_full_quic_transfer() {
             ),
             Err(TransferError::InvalidBudget)
         ));
+        assert_eq!(
+            bounded_wire_get(&second_connection, trusted, 0..manifest.size)
+                .await
+                .as_deref(),
+            Err("GET exceeds Staya's 1 MiB per-range budget"),
+            "the wire harness must refuse an oversized request before I/O"
+        );
         let requested = [(0, cap), (cap, manifest.size)];
         let quota = SharedAdmission::new(Limits {
             max_partial_objects: 1,
