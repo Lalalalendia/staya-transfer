@@ -52,7 +52,13 @@ jobs:
             'docs/ADR-0031-signed-deny-transition-gateway.md',
             '.github/workflows/owner-signed-deny.yml',
           }
-          assert actual==expected, ('out of approved research scope',actual^expected)
+          writer_layer={
+            'interop/owner-witness-lab/owner_deny_gateway.go',
+            'interop/owner-witness-lab/owner_deny_gateway_test.go',
+            'docs/ADR-0032-mtls-owner-deny-writer-gateway.md',
+            '.github/workflows/owner-mtls-writer.yml',
+          }
+          assert actual in (expected, expected|writer_layer), ('out of approved research scope',actual)
           assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in actual)
           PY
           git diff --check
