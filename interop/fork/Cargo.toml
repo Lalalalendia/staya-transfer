@@ -37,3 +37,7 @@ iroh-blobs = { git = "https://github.com/Lalalalendia/iroh-blobs", rev = "a8f5b6
 [[test]]
 name = "fsstore_disk_budget_gate"
 path = "../fsstore_disk_budget_gate.rs"
+
+[[test]]
+name = "fsstore_many_ranges_gate"
+path = "../fsstore_many_ranges_gate.rs"

@@ -89,6 +89,11 @@ jobs:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
           STY_G2_06G2_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/fsstore-cuts
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_phase_sigkill_requires_independent_root_proof --nocapture
+      - name: STY-G2-06i real FsStore 64 sparse Bao groups and cold restart
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+          STY_G2_06I_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/many-ranges
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_many_ranges_gate -- --exact real_fsstore_many_disjoint_bao_ranges_bound_resources_after_cold_reopen --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
@@ -151,4 +156,6 @@ jobs:
           echo STY_G2_06C_RELEASE_FORK_SIGKILL_SAFE_FALLBACK_WIRE_IDENTICAL=true
           cmp wire-output/wire-release/fsstore-cuts/inventory.txt wire-output/wire-fork/fsstore-cuts/inventory.txt
           echo STY_G2_06G2_RELEASE_FORK_ACTOR_CUTS_IDENTICAL=true
+          cmp wire-output/wire-release/many-ranges/inventory.txt wire-output/wire-fork/many-ranges/inventory.txt
+          echo STY_G2_06I_RELEASE_FORK_64_RANGES_IDENTICAL=true
           echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true

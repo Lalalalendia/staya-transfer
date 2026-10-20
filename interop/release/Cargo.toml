@@ -37,3 +37,7 @@ iroh-blobs = { version = "=0.103.1", default-features = false, features = ["fs-s
 [[test]]
 name = "fsstore_disk_budget_gate"
 path = "../fsstore_disk_budget_gate.rs"
+
+[[test]]
+name = "fsstore_many_ranges_gate"
+path = "../fsstore_many_ranges_gate.rs"
