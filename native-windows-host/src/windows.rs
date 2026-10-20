@@ -10,7 +10,7 @@ use std::{
     mem::size_of,
     os::windows::ffi::OsStrExt,
     path::Path,
-    ptr::{null, null_mut},
+    ptr::null,
 };
 
 type RawHandle = *mut c_void;
