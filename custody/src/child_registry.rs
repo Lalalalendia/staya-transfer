@@ -9,10 +9,7 @@ use std::{
     collections::HashMap,
     io::{self, Write},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{
-        Mutex, MutexGuard,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{atomic::{AtomicU64, Ordering}, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
