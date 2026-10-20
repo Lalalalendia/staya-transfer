@@ -58,7 +58,13 @@ jobs:
             'docs/ADR-0032-mtls-owner-deny-writer-gateway.md',
             '.github/workflows/owner-mtls-writer.yml',
           }
-          assert actual in (expected, expected|writer_layer), ('out of approved research scope',actual)
+          two_layer={
+            '.github/workflows/owner-two-authority.yml',
+            'docs/ADR-0033-two-authority-deny-checkpoint.md',
+            'interop/owner-witness-lab/owner_two_authority.go',
+            'interop/owner-witness-lab/owner_two_authority_test.go',
+          }
+          assert actual in (expected, expected|writer_layer, expected|writer_layer|two_layer), ('out of approved research scope',actual)
           assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in actual)
           PY
           git diff --check

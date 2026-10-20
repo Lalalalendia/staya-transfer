@@ -51,7 +51,13 @@ jobs:
             '.github/workflows/owner-ledger-cas.yml',
             '.github/workflows/owner-witness.yml',
           }
-          assert actual == expected, ('unexpected writer lab scope',actual^expected)
+          two_layer={
+            '.github/workflows/owner-two-authority.yml',
+            'docs/ADR-0033-two-authority-deny-checkpoint.md',
+            'interop/owner-witness-lab/owner_two_authority.go',
+            'interop/owner-witness-lab/owner_two_authority_test.go',
+          }
+          assert actual in (expected, expected|two_layer), ('unexpected writer lab scope',actual^expected)
           assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in actual)
           PY
           git diff --check

@@ -67,7 +67,13 @@ jobs:
             'docs/ADR-0032-mtls-owner-deny-writer-gateway.md',
             '.github/workflows/owner-mtls-writer.yml',
           }
-          assert changes in (expected, expected|ydb_layer, expected|ydb_layer|signed_layer, expected|ydb_layer|signed_layer|writer_layer), ('forbidden path or incomplete YDB research layer',changes)
+          two_layer={
+            '.github/workflows/owner-two-authority.yml',
+            'docs/ADR-0033-two-authority-deny-checkpoint.md',
+            'interop/owner-witness-lab/owner_two_authority.go',
+            'interop/owner-witness-lab/owner_two_authority_test.go',
+          }
+          assert changes in (expected, expected|ydb_layer, expected|ydb_layer|signed_layer, expected|ydb_layer|signed_layer|writer_layer, expected|ydb_layer|signed_layer|writer_layer|two_layer), ('forbidden path or incomplete YDB research layer',changes)
           assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in changes)
           PY
           git diff --check
