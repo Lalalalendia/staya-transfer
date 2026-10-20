@@ -90,7 +90,9 @@ async fn real_fsstore_enospc_rejects_writer_and_cold_restart() {
             .is_empty(),
             "a failed FsStore import cannot mint a usable checkpoint"
         );
-        let reopened = FsStore::load(&root).await.expect("real cold FsStore reopen");
+        let reopened = FsStore::load(&root)
+            .await
+            .expect("real cold FsStore reopen");
         let missing: u64 = MissingRanges::from_checkpoint(
             identity.manifest,
             &VerifiedCheckpoint::empty(identity.manifest),
@@ -103,7 +105,10 @@ async fn real_fsstore_enospc_rejects_writer_and_cold_restart() {
         .unwrap()
         .map(|part| part.len())
         .sum();
-        assert_eq!(missing, OBJECT_LEN as u64, "recovery must redownload everything");
+        assert_eq!(
+            missing, OBJECT_LEN as u64,
+            "recovery must redownload everything"
+        );
         reopened.shutdown().await.expect("cold actor shutdown");
         // Physical data may or may not survive disk-full. Even an authentic
         // partial range without a checkpoint cannot authorize a skip.
@@ -165,7 +170,10 @@ async fn real_fsstore_enospc_rejects_writer_and_cold_restart() {
             Err(e) => panic!("filler failed with non-ENOSPC {e:?}"),
         }
     }
-    assert!(kernel_enospc, "filesystem was never exhausted by real writes");
+    assert!(
+        kernel_enospc,
+        "filesystem was never exhausted by real writes"
+    );
     assert!(filled > 1024 * 1024, "unexpectedly small isolated mount");
 
     // Different 16-KiB Bao groups must allocate new .data pages.
