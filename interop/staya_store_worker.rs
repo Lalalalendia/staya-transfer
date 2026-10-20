@@ -94,7 +94,10 @@ async fn main() {
         .await
         .unwrap_or_else(|e| abort_hold("fsstore-write", e));
     if tag.hash.as_bytes() != expected.as_bytes() {
-        abort_hold("fsstore-hash", "upstream hash disagrees with expected bytes");
+        abort_hold(
+            "fsstore-hash",
+            "upstream hash disagrees with expected bytes",
+        );
     }
     owner
         .validate_fence()
@@ -103,13 +106,19 @@ async fn main() {
     // upstream defaults may inline smaller outboards into the metadata DB,
     // so require real files before publishing this fixture's readiness.
     let hex = expected.to_hex().to_string();
-    let data_path = owner.canonical_root().join("data").join(format!("{hex}.data"));
+    let data_path = owner
+        .canonical_root()
+        .join("data")
+        .join(format!("{hex}.data"));
     let bao_path = owner
         .canonical_root()
         .join("data")
         .join(format!("{hex}.obao4"));
     if !data_path.is_file() || !bao_path.is_file() {
-        abort_hold("physical-sidecars", "pinned FsStore did not materialize data+outboard");
+        abort_hold(
+            "physical-sidecars",
+            "pinned FsStore did not materialize data+outboard",
+        );
     }
     publish_ready(owner.canonical_root(), expected.as_bytes())
         .unwrap_or_else(|e| abort_hold("ready-marker", e));

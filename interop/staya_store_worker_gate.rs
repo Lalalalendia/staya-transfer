@@ -7,15 +7,15 @@ use bao_tree::{
     BaoTree, BlockSize, ByteRanges,
     io::{outboard::PreOrderOutboard, round_up_to_chunks, sync::encode_ranges_validated},
 };
-use staya_custody_lab::{StoreLease, checkpoint::{read_candidates, IROH_PREORDER_16K}};
-use staya_transfer::{
-    ByteRange, ContentId, Manifest, TransferRequest,
-    bao::verify_bao_range,
+use staya_custody_lab::{
+    StoreLease,
+    checkpoint::{IROH_PREORDER_16K, read_candidates},
 };
+use staya_transfer::{ByteRange, ContentId, Manifest, TransferRequest, bao::verify_bao_range};
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::Path,
     process::{self, Child, Command, Stdio},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -104,7 +104,9 @@ fn launcher(root: &Path) -> io::Result<()> {
         }
         #[cfg(windows)]
         if ProcessWatcher::open(pid)?.exited(0)? {
-            return Err(io::Error::other("Windows FsStore worker exited before readiness"));
+            return Err(io::Error::other(
+                "Windows FsStore worker exited before readiness",
+            ));
         }
         if started.elapsed() >= DEADLINE {
             return Err(io::Error::new(
@@ -145,7 +147,9 @@ fn audit_physical_bao(root: &Path, expected: blake3::Hash) {
     assert_eq!(fs::read(&data_path).expect("physical data"), bytes);
     let tree = BaoTree::new(OBJECT_SIZE as u64, BlockSize::from_chunk_log(4));
     assert_eq!(
-        fs::metadata(&bao_path).expect("real FsStore outboard").len(),
+        fs::metadata(&bao_path)
+            .expect("real FsStore outboard")
+            .len(),
         tree.outboard_size()
     );
     let data = fs::File::open(data_path).expect("physical data handle");
@@ -251,7 +255,9 @@ fn real_fsstore_native_containment_survives_parent_kill() {
         "launcher must not have exited cleanly"
     );
     assert!(
-        witness.exited(15000).expect("native worker death observation"),
+        witness
+            .exited(15000)
+            .expect("native worker death observation"),
         "OS-contained real FsStore worker survived launcher death: HOLD"
     );
     let next_owner =
