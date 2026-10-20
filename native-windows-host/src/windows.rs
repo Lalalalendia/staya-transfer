@@ -91,15 +91,23 @@ struct ExtendedLimitInformation {
 unsafe extern "system" {
     fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> RawHandle;
     fn SetInformationJobObject(
-        job: RawHandle, info_class: i32, info: *const c_void, info_size: u32,
+        job: RawHandle,
+        info_class: i32,
+        info: *const c_void,
+        info_size: u32,
     ) -> i32;
     fn GetHandleInformation(handle: RawHandle, flags: *mut u32) -> i32;
     fn CreateProcessW(
-        app: *const u16, command: *mut u16,
-        process_attributes: *const c_void, thread_attributes: *const c_void,
-        inherit_handles: i32, creation_flags: u32,
-        environment: *const c_void, directory: *const u16,
-        startup: *mut StartupInfoW, info: *mut ProcessInformation,
+        app: *const u16,
+        command: *mut u16,
+        process_attributes: *const c_void,
+        thread_attributes: *const c_void,
+        inherit_handles: i32,
+        creation_flags: u32,
+        environment: *const c_void,
+        directory: *const u16,
+        startup: *mut StartupInfoW,
+        info: *mut ProcessInformation,
     ) -> i32;
     fn AssignProcessToJobObject(job: RawHandle, process: RawHandle) -> i32;
     fn ResumeThread(thread: RawHandle) -> u32;
@@ -149,7 +157,9 @@ impl ProcessWatcher {
             WAIT_OBJECT_0 => Ok(true),
             WAIT_TIMEOUT => Ok(false),
             WAIT_FAILED => Err(io::Error::last_os_error()),
-            _ => Err(io::Error::other("unexpected Windows process wait state: HOLD")),
+            _ => Err(io::Error::other(
+                "unexpected Windows process wait state: HOLD",
+            )),
         }
     }
 }
@@ -231,7 +241,9 @@ impl SuspendedJobWorker {
             return Err(io::Error::last_os_error());
         }
         if flags & HANDLE_FLAG_INHERIT != 0 {
-            return Err(io::Error::other("inheritable JobObject handle forbidden: HOLD"));
+            return Err(io::Error::other(
+                "inheritable JobObject handle forbidden: HOLD",
+            ));
         }
 
         let mut command = win_quote(executable.as_os_str());
@@ -240,7 +252,11 @@ impl SuspendedJobWorker {
             command.extend(win_quote(arg.as_os_str()));
         }
         command.push(0);
-        let app: Vec<u16> = executable.as_os_str().encode_wide().chain(Some(0)).collect();
+        let app: Vec<u16> = executable
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
 
         // SAFETY: valid Windows STARTUPINFOW POD initialized with zeroes.
         let mut startup: StartupInfoW = unsafe { std::mem::zeroed() };
@@ -252,9 +268,16 @@ impl SuspendedJobWorker {
         // all other pointers are valid or NULL, inheritance is explicitly OFF.
         if unsafe {
             CreateProcessW(
-                app.as_ptr(), command.as_mut_ptr(),
-                null(), null(), 0, CREATE_SUSPENDED,
-                null(), null(), &mut startup, &mut info,
+                app.as_ptr(),
+                command.as_mut_ptr(),
+                null(),
+                null(),
+                0,
+                CREATE_SUSPENDED,
+                null(),
+                null(),
+                &mut startup,
+                &mut info,
             )
         } == 0
         {

@@ -7,14 +7,16 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    process,
-    thread,
+    process, thread,
     time::{Duration, Instant},
 };
 
 fn publish(root: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let pending = root.join(format!(".{name}.pending"));
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&pending)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pending)?;
     file.write_all(bytes)?;
     file.sync_all()?; // original writable Windows handle, never File::open
     drop(file);
@@ -25,7 +27,10 @@ fn await_file(root: &Path, name: &str) -> io::Result<()> {
     let start = Instant::now();
     while !root.join(name).is_file() {
         if start.elapsed() > Duration::from_secs(12) {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "process fixture timeout: HOLD"));
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "process fixture timeout: HOLD",
+            ));
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -33,7 +38,11 @@ fn await_file(root: &Path, name: &str) -> io::Result<()> {
 }
 
 fn worker(root: &Path) -> io::Result<()> {
-    publish(root, "worker-started", b"EXECUTED_ONLY_AFTER_JOB_ASSIGNMENT")?;
+    publish(
+        root,
+        "worker-started",
+        b"EXECUTED_ONLY_AFTER_JOB_ASSIGNMENT",
+    )?;
     loop {
         thread::sleep(Duration::from_secs(1));
     }
@@ -41,17 +50,20 @@ fn worker(root: &Path) -> io::Result<()> {
 
 fn launcher(root: &Path, inject_failure_before_assignment: bool) -> io::Result<()> {
     let executable = env::current_exe()?;
-    let args: Vec<OsString> = vec![
-        OsString::from("--worker"),
-        root.as_os_str().to_os_string(),
-    ];
+    let args: Vec<OsString> = vec![OsString::from("--worker"), root.as_os_str().to_os_string()];
     let suspended = SuspendedJobWorker::create(&executable, &args)?;
-    publish(root, "worker-pid", suspended.process_id().to_string().as_bytes())?;
+    publish(
+        root,
+        "worker-pid",
+        suspended.process_id().to_string().as_bytes(),
+    )?;
     // Grandparent independently opens a PROCESS-only wait handle while the
     // child is suspended; it NEVER receives a JobObject handle.
     await_file(root, "grandparent-has-process-handle")?;
     if root.join("worker-started").exists() {
-        return Err(io::Error::other("worker ran before suspended Job assignment"));
+        return Err(io::Error::other(
+            "worker ran before suspended Job assignment",
+        ));
     }
 
     if inject_failure_before_assignment {
@@ -82,8 +94,13 @@ fn launcher(root: &Path, inject_failure_before_assignment: bool) -> io::Result<(
 fn run() -> io::Result<()> {
     let mut args = env::args_os();
     let _program = args.next();
-    let mode = args.next().ok_or_else(|| io::Error::other("missing test mode"))?;
-    let root = PathBuf::from(args.next().ok_or_else(|| io::Error::other("missing root"))?);
+    let mode = args
+        .next()
+        .ok_or_else(|| io::Error::other("missing test mode"))?;
+    let root = PathBuf::from(
+        args.next()
+            .ok_or_else(|| io::Error::other("missing root"))?,
+    );
     if args.next().is_some() {
         return Err(io::Error::other("unexpected fixture command argument"));
     }

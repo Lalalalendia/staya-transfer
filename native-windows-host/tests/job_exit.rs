@@ -49,7 +49,11 @@ fn await_file(root: &Path, name: &str, launcher: &mut Child) {
 fn run_case(fail_assignment: bool) {
     let root = private_root(if fail_assignment { "denied" } else { "killed" });
     let executable = env!("CARGO_BIN_EXE_staya-windows-job-lab");
-    let mode = if fail_assignment { "--launcher-refuse" } else { "--launcher" };
+    let mode = if fail_assignment {
+        "--launcher-refuse"
+    } else {
+        "--launcher"
+    };
     let child = Command::new(executable)
         .arg(mode)
         .arg(&root)
@@ -102,7 +106,10 @@ fn run_case(fail_assignment: bool) {
         // This is a true Windows TerminateProcess of launcher, not Rust
         // Drop. The process owns the ONLY JobObject HANDLE; the separate
         // PROCESS wait handle intentionally does not keep the job alive.
-        launcher.0.kill().expect("native Windows TerminateProcess launcher");
+        launcher
+            .0
+            .kill()
+            .expect("native Windows TerminateProcess launcher");
         launcher.0.wait().expect("reap launcher OS process");
         assert!(
             worker.exited(10_000).expect("kernel child-process exit"),
