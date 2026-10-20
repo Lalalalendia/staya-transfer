@@ -22,9 +22,15 @@ EXIT_TIMEOUT = 100
 
 
 def command(*args, timeout=90):
-    return subprocess.run(
-        list(args), check=True, capture_output=True, text=True, timeout=timeout
-    ).stdout.strip()
+    process = subprocess.run(
+        list(args), capture_output=True, text=True, timeout=timeout
+    )
+    if process.returncode:
+        raise RuntimeError(
+            f"command {args[:2]} failed ({process.returncode}); "
+            f"stderr={process.stderr[-1200:]}"
+        )
+    return process.stdout.strip()
 
 
 class Child:
@@ -127,11 +133,31 @@ def main():
         build = temp / "image"
         build.mkdir()
         shutil.copy2(binary, build / "staya-direct-preview")
+        # Keep CI-only shell alive after successful CLI exit: stopping the
+        # Docker container would otherwise discard its ephemeral /tmp.
+        (build / "entrypoint.sh").write_text(
+            "#!/bin/sh\n"
+            '"/usr/local/bin/staya-direct-preview" "$@"\n'
+            "status=$?\n"
+            'if [ "$status" -eq 0 ] && [ "$1" = "receive" ]; then\n'
+            "  printf 'CONTAINER_STAGE_READY\\n'\n"
+            "  loops=0\n"
+            "  while [ ! -f /tmp/staya-g1g-ack ]; do\n"
+            "    loops=$((loops + 1))\n"
+            "    if [ $loops -ge 900 ]; then exit 42; fi\n"
+            "    sleep 0.1\n"
+            "  done\n"
+            "fi\n"
+            'exit "$status"\n',
+            encoding="utf-8",
+        )
+        (build / "entrypoint.sh").chmod(0o755)
         (build / "Dockerfile").write_text(
             "FROM ubuntu:24.04\n"
             "COPY staya-direct-preview /usr/local/bin/staya-direct-preview\n"
+            "COPY entrypoint.sh /usr/local/bin/entrypoint.sh\n"
             "USER 65532:65532\n"
-            'ENTRYPOINT ["/usr/local/bin/staya-direct-preview"]\n',
+            'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]\n',
             encoding="utf-8",
         )
         fixture = temp / "synthetic-payload.bin"
@@ -200,7 +226,10 @@ def main():
             assert report.startswith("STAGED ") and report.endswith("NOT_APPLIED=true"), report
             assert f"ROOT={fields[2]}" in report, "staged root not tied to trusted ticket"
             assert f"SIZE={len(payload)}" in report, "staged size not tied to trusted ticket"
-            assert authorized.wait() == 0, f"authorized receiver failed: {authorized.err[-8:]}"
+            ready = authorized.next_line()
+            assert ready == "CONTAINER_STAGE_READY", (
+                "real receiver did not finish successfully before tmpfs readback"
+            )
             path = report[len("STAGED "):].split(" ROOT=", 1)[0]
             assert path.startswith("/tmp/staya-direct-preview-receiver-")
             assert path.endswith("/verified-staged.bin")
@@ -209,6 +238,10 @@ def main():
             command("docker", "cp", f"{containers[0]}:{path}", str(received))
             content = received.read_bytes()
             assert content == payload, "network-isolated receiver staged incorrect bytes"
+            # Only release the CI wrapper after independently reading the
+            # actual file while the receiver's private tmpfs remains mounted.
+            command("docker", "exec", containers[0], "touch", "/tmp/staya-g1g-ack")
+            assert authorized.wait() == 0, f"receiver wrapper failed: {authorized.err[-8:]}"
 
             provider.send("")
             provider.close_stdin()
