@@ -1046,15 +1046,21 @@ async fn windows_terminated_receiver_requires_new_full_quic_transfer() {
         let second_connection = client.connect(address, iroh_blobs::ALPN)
             .await
             .expect("second authenticated direct QUIC connection");
-        let wire = tokio::time::timeout(
-            STEP_TIMEOUT,
-            bounded_wire_get(&second_connection, trusted, 0..manifest.size),
-        )
-        .await
-        .expect("post-kill full GET deadline")
-        .expect("full real QUIC GET after crash");
-        verify_network_response(manifest, 0..manifest.size, &wire, &data)
-            .expect("fresh full object has valid root-anchored Bao proof");
+        // A full-object request is deliberately rejected by Staya's 1 MiB
+        // per-range admission limit. Preserve that guard: safely fetch ALL
+        // bytes in separate, bounded 16 KiB-aligned Bao groups instead.
+        let cap = staya_transfer::planner::MAX_PLANNED_RANGE_BYTES;
+        assert_eq!(cap % (16 * 1024), 0);
+        assert!(manifest.size > cap, "exercise the full-download budget boundary");
+        assert!(
+            TransferRequest::new(
+                manifest,
+                ByteRange::new(0, manifest.size, manifest.size).unwrap()
+            )
+            .is_err(),
+            "one oversized GET must remain forbidden"
+        );
+        let requested = [(0, cap), (cap, manifest.size)];
         let quota = SharedAdmission::new(Limits {
             max_partial_objects: 1,
             max_reserved_bytes: 4 * 1024 * 1024,
@@ -1063,14 +1069,37 @@ async fn windows_terminated_receiver_requires_new_full_quic_transfer() {
         })
         .unwrap();
         let stop = AtomicBool::new(false);
-        let full = ByteRange::new(0, manifest.size, manifest.size).unwrap();
-        let (_accepted, permit) = stage_with_inflight_budget(
-            &retry, &quota, &receiver, identity, full, &wire, &stop,
-        )
-        .await
-        .expect("fresh store imports independently authenticated full GET");
-        drop(permit);
-        let complete = receiver.blobs().get_bytes(trusted)
+        let mut recovered_wires = Vec::new();
+        for &(start, end) in &requested {
+            assert!(end > start && end - start <= cap);
+            let wire = tokio::time::timeout(
+                STEP_TIMEOUT,
+                bounded_wire_get(&second_connection, trusted, start..end),
+            )
+            .await
+            .expect("bounded post-kill QUIC GET deadline")
+            .expect("actual post-kill QUIC range");
+            verify_network_response(manifest, start..end, &wire, &data)
+                .expect("each bounded GET carries valid root-anchored Bao proof");
+            let range = ByteRange::new(start, end, manifest.size).unwrap();
+            let (_accepted, permit) = stage_with_inflight_budget(
+                &retry, &quota, &receiver, identity, range, &wire, &stop,
+            )
+            .await
+            .expect("fresh store imports verified bounded QUIC range");
+            drop(permit);
+            assert_eq!(quota.usage().unwrap(), (0, 0, 0));
+            recovered_wires.push(wire);
+        }
+        assert_eq!(recovered_wires.len(), requested.len());
+        assert_eq!(
+            requested.iter().map(|(start, end)| end - start).sum::<u64>(),
+            manifest.size,
+            "fallback must re-download every byte without trusting killed store"
+        );
+        let complete = receiver
+            .blobs()
+            .get_bytes(trusted)
             .await
             .expect("FsStore exposes newly downloaded complete blob");
         assert_eq!(Hash::new(complete.as_ref()), trusted);
@@ -1080,12 +1109,15 @@ async fn windows_terminated_receiver_requires_new_full_quic_transfer() {
             let evidence = PathBuf::from(directory);
             fs::create_dir_all(&evidence).unwrap();
             fs::write(evidence.join("first.wire"), &first).unwrap();
-            fs::write(evidence.join("redownload.wire"), &wire).unwrap();
+            fs::write(evidence.join("redownload-0.wire"), &recovered_wires[0]).unwrap();
+            fs::write(evidence.join("redownload-1.wire"), &recovered_wires[1]).unwrap();
             fs::write(
                 evidence.join("inventory.txt"),
                 format!(
-                    "mode=windows_uncommitted_terminate\nfirst_get={START}-{END}\ncheckpoint_candidates=0\nrecovery_get=0-{}\nfull_blake3={}\nwindows_durable_skip=false\n",
-                    manifest.size,
+                    "mode=windows_uncommitted_terminate\nfirst_get={START}-{END}\ncheckpoint_candidates=0\nrecovery_get=0-{}\nrecovery_get={}-{}\nfull_blake3={}\nwindows_durable_skip=false\n",
+                    requested[0].1,
+                    requested[1].0,
+                    requested[1].1,
                     trusted.to_hex(),
                 ),
             )

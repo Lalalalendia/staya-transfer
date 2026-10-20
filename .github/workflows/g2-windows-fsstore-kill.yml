@@ -69,5 +69,6 @@ jobs:
         run: |
           cmp compare/windows-terminate-quic-release/inventory.txt compare/windows-terminate-quic-fork/inventory.txt
           cmp compare/windows-terminate-quic-release/first.wire compare/windows-terminate-quic-fork/first.wire
-          cmp compare/windows-terminate-quic-release/redownload.wire compare/windows-terminate-quic-fork/redownload.wire
+          cmp compare/windows-terminate-quic-release/redownload-0.wire compare/windows-terminate-quic-fork/redownload-0.wire
+          cmp compare/windows-terminate-quic-release/redownload-1.wire compare/windows-terminate-quic-fork/redownload-1.wire
           echo STY_G2_06D_WINDOWS_SAFE_QUIC_FALLBACK_RELEASE_FORK_IDENTICAL=true
