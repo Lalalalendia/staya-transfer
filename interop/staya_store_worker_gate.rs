@@ -93,7 +93,9 @@ fn launcher(root: &Path) -> io::Result<()> {
         ];
         let suspended = SuspendedJobWorker::create(executable, &args)?;
         if root.join(".staya-writer.lock").exists() || root.join("data").exists() {
-            return Err(io::Error::other("FsStore opened before Job assignment: HOLD"));
+            return Err(io::Error::other(
+                "FsStore opened before Job assignment: HOLD",
+            ));
         }
         let assigned = suspended.assign()?;
         if root.join(".staya-writer.lock").exists() || root.join("data").exists() {
@@ -417,11 +419,9 @@ fn windows_real_worker(
         expected_parent.to_string().into(),
         pipe_name.into(),
     ];
-    let suspended = SuspendedJobWorker::create(
-        Path::new(env!("CARGO_BIN_EXE_staya-store-worker")),
-        &args,
-    )
-    .expect("start actual suspended FsStore binary");
+    let suspended =
+        SuspendedJobWorker::create(Path::new(env!("CARGO_BIN_EXE_staya-store-worker")), &args)
+            .expect("start actual suspended FsStore binary");
     suspended
         .assign()
         .expect("attach job before any worker code")
@@ -473,7 +473,9 @@ fn real_fsstore_windows_ipc_denies_wrong_parent_before_custody() {
     let worker = windows_real_worker(&root, u32::MAX, server.name());
     let witness = ProcessWatcher::open(worker.process_id()).expect("process wait handle");
     assert!(
-        witness.exited(8000).expect("worker must fail before StoreLease"),
+        witness
+            .exited(8000)
+            .expect("worker must fail before StoreLease"),
         "mismatched Windows launcher PID did not deny"
     );
     assert_windows_no_custody(&root);
@@ -490,7 +492,9 @@ fn real_fsstore_windows_ipc_denies_missing_pipe_before_custody() {
     let worker = windows_real_worker(&root, process::id(), no_server);
     let witness = ProcessWatcher::open(worker.process_id()).expect("process wait handle");
     assert!(
-        witness.exited(8000).expect("worker must fail before StoreLease"),
+        witness
+            .exited(8000)
+            .expect("worker must fail before StoreLease"),
         "missing pipe did not deny"
     );
     assert_windows_no_custody(&root);
