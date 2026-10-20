@@ -143,7 +143,6 @@ jobs:
           STY_G2_06I_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/many-ranges
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_many_ranges_gate -- --exact real_fsstore_many_disjoint_bao_ranges_bound_resources_after_cold_reopen --nocapture
       - name: STY-G1f two real OS processes via direct Iroh QUIC and private staging
-      - name: STY-G1f two real OS processes via direct Iroh QUIC and private staging
         env:
           STY_G1F_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/direct-preview
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_manual_direct_file_two_os_processes_and_unlisted_peer_denied --nocapture

@@ -57,7 +57,6 @@ jobs:
       - name: G2-05h3d real Windows child join before pinned actor shutdown
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_registered_child_join_precedes_actor_quiescence --nocapture
       - name: STY-G1f actual two-process direct QUIC preview and refused outsider
-      - name: STY-G1f actual two-process direct QUIC preview and refused outsider
         env:
           STY_G1F_OUTPUT_DIR: ${{ github.workspace }}/g1f-private-preview
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_manual_direct_file_two_os_processes_and_unlisted_peer_denied --nocapture
