@@ -36,5 +36,7 @@ jobs:
         run: cargo test --manifest-path native-windows-host/Cargo.toml --locked --all-targets -- --nocapture
       - name: STY-G2-05h3g3 actual restricted SID and kernel PID pipe ARM
         run: cargo test --manifest-path native-windows-host/Cargo.toml --locked --test pipe_ipc -- --nocapture
+      - name: STY-G2-05h3g5 real overlapped connect and missing-ARM timeouts
+        run: cargo test --manifest-path native-windows-host/Cargo.toml --locked --test pipe_timeout -- --nocapture
       - name: Strict Windows native syscall lint
         run: cargo clippy --manifest-path native-windows-host/Cargo.toml --locked --all-targets -- -D warnings
