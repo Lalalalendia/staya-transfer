@@ -37,6 +37,81 @@ jobs:
         run: cargo fmt --manifest-path custody/Cargo.toml --all -- --check
       - name: OS-process ownership, hardlink and kill regression tests
         run: cargo test --manifest-path custody/Cargo.toml --locked --all-targets -- --nocapture
+      # Evidence-only A/B: unlike the ordinary test, this path explicitly
+      # issues LOCK_UN. Runs untraced even when the original Drop test fails.
+      # Do not interpret this experiment as production custody acceptance.
+      - name: Experiment explicit unlock after quiescent owner
+        if: always() && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        run: cargo test --manifest-path custody/Cargo.toml --locked --test process explicit_unlock_reacquire_128_with_competing_process -- --exact --nocapture
+      # Stress both variants in independent test process invocations without
+      # strace. One green run is insufficient given a timing-sensitive failure.
+      - name: Compare 16 independent untraced Drop vs explicit unlock runs
+        if: always() && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        shell: bash
+        run: |
+          drop_failures=0
+          explicit_failures=0
+          for trial in $(seq 1 16); do
+            echo "STY_G2_05D_TRIAL=$trial"
+            if ! cargo test --manifest-path custody/Cargo.toml --locked --test process repeated_drop_and_reacquire_has_no_stale_lock_descriptor -- --exact --quiet; then
+              drop_failures=$((drop_failures+1))
+            fi
+            if ! cargo test --manifest-path custody/Cargo.toml --locked --test process explicit_unlock_reacquire_128_with_competing_process -- --exact --quiet; then
+              explicit_failures=$((explicit_failures+1))
+            fi
+          done
+          echo "STY_G2_05D_UNTRACED_AB drop_failures=$drop_failures explicit_failures=$explicit_failures trials=16"
+          test "$drop_failures" -eq 0 && test "$explicit_failures" -eq 0
+      # Test a separate Linux thread repeatedly spawning OS children against
+      # another private root while the target lease churns. This test is
+      # diagnostic; it reports BUSY counts and does not waive required gates.
+      - name: Isolate Linux unrelated fork-exec interference
+        if: always() && runner.os == 'Linux' && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        run: cargo test --manifest-path custody/Cargo.toml --locked --test process linux_unrelated_spawn_interference_diagnostic -- --exact --nocapture
+      # Controlled A/B for test-runner concurrency. The exact same process
+      # integration suite is run serially and with default parallel test threads.
+      # Do not hide failures by switching the required suite to serial mode.
+      - name: Diagnose serial versus parallel process-test interference
+        if: always() && runner.os == 'Linux' && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        shell: bash
+        run: |
+          serial_failures=0
+          parallel_failures=0
+          for trial in $(seq 1 8); do
+            if ! cargo test --manifest-path custody/Cargo.toml --locked --test process -- --test-threads=1 > "$RUNNER_TEMP/staya-serial-$trial.log" 2>&1; then
+              serial_failures=$((serial_failures+1))
+              echo "STY_G2_05D_SERIAL_FAIL trial=$trial"
+              tail -n 28 "$RUNNER_TEMP/staya-serial-$trial.log"
+            fi
+            if ! cargo test --manifest-path custody/Cargo.toml --locked --test process > "$RUNNER_TEMP/staya-parallel-$trial.log" 2>&1; then
+              parallel_failures=$((parallel_failures+1))
+              echo "STY_G2_05D_PARALLEL_FAIL trial=$trial"
+              tail -n 28 "$RUNNER_TEMP/staya-parallel-$trial.log"
+            fi
+          done
+          echo "STY_G2_05D_THREAD_AB serial_failures=$serial_failures parallel_failures=$parallel_failures trials=8"
+          test "$serial_failures" -eq 0 && test "$parallel_failures" -eq 0
+      # Temporary PR-only forensic step; REMOVE before accepting G2-05d.
+      - name: Diagnose Linux flock syscall history after an ownership failure
+        if: failure() && runner.os == 'Linux' && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        shell: bash
+        run: |
+          command -v strace >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq strace)
+          set +e
+          strace -f -tt -e trace=flock,close,dup,dup2,dup3,openat,fcntl -o "$RUNNER_TEMP/staya-g2-05d-flock.trace" \
+            cargo test --manifest-path custody/Cargo.toml --locked --test process repeated_drop_and_reacquire_has_no_stale_lock_descriptor -- --exact --nocapture
+          traced_status=$?
+          set -e
+          echo "STY_G2_05D_STRACE_TEST_EXIT=$traced_status"
+          grep 'flock(' "$RUNNER_TEMP/staya-g2-05d-flock.trace" | tail -n 80 || true
+      - name: Retain diagnostic Linux syscall trace
+        if: failure() && runner.os == 'Linux' && github.head_ref == 'feature/sty-g2-05c-lock-identity-no-clone-20261020'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-g2-05d-flock-trace
+          path: ${{ runner.temp }}/staya-g2-05d-flock.trace
+          if-no-files-found: warn
+          retention-days: 3
       - name: Rust Clippy deny warnings
         run: cargo clippy --manifest-path custody/Cargo.toml --locked --all-targets -- -D warnings
       - name: STY-G2-06g1 Linux real SIGKILL checkpoint cut-points

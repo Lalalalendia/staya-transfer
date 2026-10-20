@@ -102,9 +102,26 @@ impl StoreLease {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&lock_path)?;
-        let lock_identity = Handle::from_file(file.try_clone()?)?;
-        file.try_lock().map_err(io::Error::from)?;
+            .open(&lock_path)
+            .map_err(|err| io::Error::new(err.kind(), format!("lockfile open: {err}")))?;
+        // Compare the actual newly opened file against its directory entry.
+        // Do NOT retain a duplicate of the locking file description for the
+        // entire lease: File::try_lock on Unix is flock-based, and a retained
+        // try_clone() can extend lock lifetime until the duplicate is closed.
+        // A fresh path-based Handle is an independently opened descriptor used
+        // ONLY for identity checks; it is never the locking descriptor.
+        let opened_identity = Handle::from_file(file.try_clone()?)
+            .map_err(|err| io::Error::new(err.kind(), format!("open-file identity: {err}")))?;
+        let lock_identity = Handle::from_path(&lock_path)
+            .map_err(|err| io::Error::new(err.kind(), format!("path identity: {err}")))?;
+        if opened_identity != lock_identity {
+            return Err(invalid("custody lockfile changed during acquisition"));
+        }
+        drop(opened_identity);
+        file.try_lock().map_err(|reason| {
+            let err = io::Error::from(reason);
+            io::Error::new(err.kind(), format!("exclusive try_lock: {err}"))
+        })?;
         let guard = Self {
             canonical_root,
             root_identity,
@@ -112,7 +129,9 @@ impl StoreLease {
             lock_identity,
             _held_exclusive_lock: file,
         };
-        guard.validate_fence()?;
+        guard
+            .validate_fence()
+            .map_err(|err| io::Error::new(err.kind(), format!("initial fence: {err}")))?;
         Ok(guard)
     }
 
@@ -135,6 +154,18 @@ impl StoreLease {
             return Err(invalid("lockfile inode/identity replaced while lease held"));
         }
         Ok(())
+    }
+
+    /// Experimental explicit release for a **quiescent** cooperative owner.
+    ///
+    /// Test the difference between kernel LOCK_UN and relying only on close().
+    /// Must be called ONLY after all FsStore writers are stopped; LOCK_UN
+    /// also releases the lock from fork-inherited/cloned file descriptions.
+    /// G2-05d must not use this as a production fix until the failure's
+    /// cause and fork inheritance behavior are independently verified.
+    pub fn release(self) -> io::Result<()> {
+        self.validate_fence()?;
+        self._held_exclusive_lock.unlock()
     }
 
     /// Only diagnostic/read-only; no caller may move/delete this lockfile.

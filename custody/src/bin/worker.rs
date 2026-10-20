@@ -12,6 +12,18 @@ fn main() {
     let root = args.next().expect("private local store path");
     assert!(args.next().is_none(), "unexpected input");
 
+    // Linux-only diagnostic: parent deliberately passes its flock's open file
+    // description as stdin. Do not open another StoreLease in this worker.
+    // The inherited descriptor stays alive until this process is killed.
+    #[cfg(target_os = "linux")]
+    if mode == "hold-inherited-fd" {
+        println!("INHERITED_FD_READY");
+        io::stdout().flush().unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+
     let guard = match StoreLease::acquire(&root) {
         Ok(guard) => guard,
         Err(err) if err.kind() == io::ErrorKind::WouldBlock => {

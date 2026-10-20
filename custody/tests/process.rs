@@ -137,6 +137,268 @@ fn alias_of_same_root_does_not_acquire_second_writer() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+fn debug_lock_ownership(root: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let lock = root.join(".staya-writer.lock");
+    let inode = fs::metadata(&lock).ok().map(|m| m.ino());
+    let mut own_fds = Vec::new();
+    if let Ok(entries) = fs::read_dir("/proc/self/fd") {
+        for entry in entries.flatten() {
+            if fs::read_link(entry.path()).ok().as_deref() == Some(lock.as_path()) {
+                own_fds.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    let current_locks = fs::read_to_string("/proc/locks").unwrap_or_default();
+    let inode_token = inode.map(|id| format!(":{id} ")).unwrap_or_default();
+    let active = current_locks
+        .lines()
+        .filter(|line| line.contains(&inode_token))
+        .take(8)
+        .collect::<Vec<_>>();
+    format!(
+        "lock={} inode={inode:?} this_process_lock_fds={own_fds:?} proc_locks={active:?}",
+        lock.display()
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn debug_lock_ownership(_root: &Path) -> String {
+    "Linux /proc lock diagnostics unavailable".to_owned()
+}
+
+#[test]
+fn repeated_drop_and_reacquire_has_no_stale_lock_descriptor() {
+    let root = private_root("reacquire-128");
+    for cycle in 0..128 {
+        let lease = StoreLease::acquire(&root).unwrap_or_else(|err| {
+            panic!(
+                "reacquire cycle {cycle} failed: {err:?}; {}",
+                debug_lock_ownership(&root)
+            )
+        });
+        lease.validate_fence().expect("owned physical identity");
+        if cycle % 32 == 0 {
+            assert_eq!(
+                stdout_text(&worker("probe", &root)),
+                "BUSY",
+                "cycle {cycle}: another OS process cannot enter while held"
+            );
+        }
+        drop(lease);
+        if cycle % 32 == 0 {
+            assert_eq!(
+                stdout_text(&worker("probe", &root)),
+                "ACQUIRED",
+                "cycle {cycle}: another OS process must enter immediately after release"
+            );
+        }
+    }
+    println!("STY_G2_05D_CUSTODY_STRESS cycles=128 cross_process_checks=8 success=true");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Linux-only, diagnostic experiment: compare uncontended lease turnover
+/// against the same operation while a distinct thread repeatedly spawns
+/// unrelated OS processes. A forked child may transiently retain an inherited
+/// open file description before exec closes CLOEXEC descriptors. This is an
+/// inference to TEST, not a claimed explanation for the existing EWOULDBLOCK.
+///
+/// The subprocesses touch a DIFFERENT, private directory. No busy error is
+/// swallowed by production code: the required 128-cycle regression remains
+/// unchanged and independently failing CI still blocks this Draft PR.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_unrelated_spawn_interference_diagnostic() {
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    fn count_busy(root: &Path, cycles: usize, explicit_release: bool) -> usize {
+        let mut busy = 0;
+        for _ in 0..cycles {
+            match StoreLease::acquire(root) {
+                Ok(lease) => {
+                    lease.validate_fence().expect("stable private root");
+                    if explicit_release {
+                        lease.release().expect("quiescent explicit unlock");
+                    } else {
+                        drop(lease);
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => busy += 1,
+                Err(err) => panic!("unexpected acquisition error: {err:?}"),
+            }
+        }
+        busy
+    }
+
+    let root = private_root("unrelated-spawn-target");
+    let explicit_root = private_root("unrelated-spawn-explicit");
+    let unrelated_root = private_root("unrelated-spawn-child");
+    let baseline_busy = count_busy(&root, 1024, false);
+
+    let started = Arc::new(Barrier::new(2));
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_started = Arc::clone(&started);
+    let thread_stop = Arc::clone(&stop);
+    let spawner = std::thread::spawn(move || {
+        thread_started.wait();
+        let mut subprocesses = 0;
+        while !thread_stop.load(Ordering::Acquire) {
+            let result = worker("probe", &unrelated_root);
+            assert_eq!(stdout_text(&result), "ACQUIRED");
+            subprocesses += 1;
+        }
+        fs::remove_dir_all(unrelated_root).expect("remove unrelated private root");
+        subprocesses
+    });
+
+    started.wait();
+    let spawn_busy = count_busy(&root, 8192, false);
+    // A/B only: release() performs explicit LOCK_UN after quiescence. The
+    // normal Drop-only behavior remains separately required and unchanged.
+    let explicit_busy = count_busy(&explicit_root, 8192, true);
+    stop.store(true, Ordering::Release);
+    let subprocesses = spawner.join().expect("unrelated subprocess test thread");
+    println!(
+        "STY_G2_05D_LINUX_SPAWN_AB baseline_wouldblock={baseline_busy} spawn_wouldblock={spawn_busy} explicit_release_wouldblock={explicit_busy} unrelated_subprocesses={subprocesses} cycles_baseline=1024 cycles_spawn_each=8192"
+    );
+    assert!(subprocesses > 0, "spawn-stress condition must be exercised");
+    // Zero observed contention is inconclusive; a nonzero number would
+    // independently reproduce the issue under concurrent, unrelated spawn.
+    fs::remove_dir_all(root).expect("remove target private root");
+    fs::remove_dir_all(explicit_root).expect("remove explicit release private root");
+}
+
+/// An explicit LOCK_UN experiment; does not replace or silence the separate
+/// Drop-only 128-cycle stress test. Both must be reported independently.
+#[test]
+fn explicit_unlock_reacquire_128_with_competing_process() {
+    let root = private_root("explicit-unlock-128");
+    for cycle in 0..128 {
+        let lease = StoreLease::acquire(&root).unwrap_or_else(|err| {
+            panic!(
+                "explicit-release cycle {cycle} failed: {err:?}; {}",
+                debug_lock_ownership(&root)
+            )
+        });
+        lease.validate_fence().expect("lease still valid");
+        if cycle % 32 == 0 {
+            assert_eq!(stdout_text(&worker("probe", &root)), "BUSY");
+        }
+        lease.release().expect("explicit OS unlock with live owner");
+        if cycle % 32 == 0 {
+            assert_eq!(stdout_text(&worker("probe", &root)), "ACQUIRED");
+        }
+    }
+    println!("STY_G2_05D_EXPLICIT_UNLOCK cycles=128 cross_process_checks=8 success=true");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Reproduces the Linux kernel's open-file-description inheritance rule
+/// deterministically, without relying on a flaky fork/exec scheduling window.
+/// This is a syscall-semantics probe, not proof that the production lock raced.
+#[cfg(target_os = "linux")]
+#[test]
+fn inherited_lock_description_survives_parent_close_until_child_exit() {
+    use std::fs::OpenOptions;
+    let root = private_root("inherited-flock");
+    let lock_path = root.join(".staya-writer.lock");
+    let owner = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .expect("fresh lock inode");
+    owner.try_lock().expect("exclusive parent owner");
+
+    // Pass an actual duplicate of the LOCKED open file description to a
+    // child via stdin. This intentionally bypasses close-on-exec.
+    let child_stdin = owner.try_clone().expect("duplicate owner fd");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_staya-custody-worker"))
+        .arg("hold-inherited-fd")
+        .arg(&root)
+        .stdin(Stdio::from(child_stdin))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn inherited descriptor holder");
+
+    let mut ready = String::new();
+    BufReader::new(child.stdout.take().expect("child stdout"))
+        .read_line(&mut ready)
+        .expect("child ready marker");
+    assert_eq!(ready.trim(), "INHERITED_FD_READY");
+    drop(owner);
+
+    // Parent file is closed, but the child still holds that very same
+    // description. An unrelated opener must fail closed.
+    assert_eq!(stdout_text(&worker("probe", &root)), "BUSY");
+    child.kill().expect("kill inherited descriptor holder");
+    child.wait().expect("reap holder");
+    assert_eq!(stdout_text(&worker("probe", &root)), "ACQUIRED");
+    println!("STY_G2_05D_INHERITED_FD parent_closed_child_alive=BUSY child_exited=ACQUIRED");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// This is a negative safety gate: an explicit LOCK_UN on one duplicated
+/// open file description releases the exclusive lock while a child still
+/// holds the description. Never call StoreLease::release while a writer is
+/// active (including an inherited child). The child is a real OS process;
+/// the reader probes are independent processes, not threads.
+#[cfg(target_os = "linux")]
+#[test]
+fn explicit_unlock_while_child_inherits_descriptor_allows_premature_second_owner() {
+    use std::fs::OpenOptions;
+    let root = private_root("premature-unlock");
+    let lock_path = root.join(".staya-writer.lock");
+    let owner = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .expect("fresh private lockfile");
+    owner.try_lock().expect("parent exclusive lock");
+    let child_stdin = owner.try_clone().expect("same locked open description");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_staya-custody-worker"))
+        .arg("hold-inherited-fd")
+        .arg(&root)
+        .stdin(Stdio::from(child_stdin))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn inherited lock holder");
+    let mut ready = String::new();
+    BufReader::new(child.stdout.take().expect("child stdout"))
+        .read_line(&mut ready)
+        .expect("read child ready marker");
+    assert_eq!(ready.trim(), "INHERITED_FD_READY");
+    assert_eq!(stdout_text(&worker("probe", &root)), "BUSY");
+
+    // The child deliberately remains alive with a duplicate of the locked
+    // description. LOCK_UN releases the lock globally, not just for parent.
+    owner.unlock().expect("test-only explicit unlock");
+    assert!(
+        child.try_wait().expect("child status").is_none(),
+        "inherited holder must still be alive during premature takeover"
+    );
+    assert_eq!(
+        stdout_text(&worker("probe", &root)),
+        "ACQUIRED",
+        "LOCK_UN must expose premature takeover risk with a live child"
+    );
+    child.kill().expect("stop inherited descriptor holder");
+    child.wait().expect("reap child");
+    drop(owner);
+    fs::remove_dir_all(root).unwrap();
+    println!(
+        "STY_G2_05D_PREMATURE_UNLOCK inherited_child_alive=true second_owner_acquired=true production_unlock_without_quiescence=DENIED"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn symbolic_link_alias_is_denied() {
