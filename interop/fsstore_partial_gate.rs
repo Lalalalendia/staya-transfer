@@ -9,6 +9,9 @@ mod partial_adapter;
 #[path = "fsstore_shutdown_supervisor.rs"]
 mod shutdown_supervisor;
 
+#[path = "fsstore_registered_supervisor.rs"]
+mod registered_supervisor;
+
 use bao_tree::{
     BlockSize, ByteRanges,
     io::{outboard::PreOrderMemOutboard, round_up_to_chunks, sync::encode_ranges_validated},
@@ -1662,3 +1665,176 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
          authenticated_ipc=false production_supervisor=false file_gate=false"
     );
 }
+
+/// G2-05h3d: a registered, real OS child with a writable handle must be
+/// positively reaped BEFORE actual pinned actor shutdown can mint quiescence.
+/// All roots/files are disposable fixtures and NEVER Akula user documents.
+#[tokio::test(flavor = "multi_thread")]
+async fn real_fsstore_registered_child_join_precedes_actor_quiescence() {
+    const CHILD_ENV: &str = "STY_G2_05H3D_REGISTERED_CHILD_ROOT";
+    const MARKER: &str = ".g2-05h3d-trusted-writer-open";
+    const NAME: &str = "real_fsstore_registered_child_join_precedes_actor_quiescence";
+
+    if let Some(root) = std::env::var_os(CHILD_ENV) {
+        use std::io::Read as _;
+
+        // This first-party, disposable test executable cannot open its
+        // writable file before the parent has registered and sent ARM.
+        let mut arm = [0u8; 1];
+        io::stdin()
+            .read_exact(&mut arm)
+            .expect("registered parent must send private ARM byte");
+        assert_eq!(arm, *b"A", "no unrecognized child writer command");
+        let path = std::path::PathBuf::from(root).join(MARKER);
+        let mut writable = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("test worker opens real writable file handle");
+        writable.write_all(b"LAB_WRITER_ARMED").unwrap();
+        writable.sync_all().unwrap();
+        // Keep the writable handle alive. Parent must kill/reap this OS
+        // process, not mistake one staged Bao permit for child shutdown.
+        let mut ignored = [0u8; 1];
+        let _ = io::stdin().read(&mut ignored);
+        return;
+    }
+
+    tokio::time::timeout(TIMEOUT, async {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "staya-g2-05h3d-{}-{nonce}-{}",
+            std::process::id(),
+            std::env::var("STY_INTEROP_VARIANT").unwrap_or_else(|_| "ci".to_owned()),
+        ));
+        assert!(!root.exists(), "never reuse a store fixture");
+        fs::create_dir(&root).expect("private local receiver root");
+        let payload = make_data();
+        let (identity, wire) = prepare(&payload);
+        let required = range()
+            .len()
+            .checked_add(u64::try_from(wire.len()).unwrap())
+            .unwrap();
+        let active = registered_supervisor::RegisteredActiveFsStore::open(
+            &root,
+            Limits {
+                max_partial_objects: 1,
+                max_reserved_bytes: required,
+                max_open_handles: 4,
+                max_retries_per_object: 2,
+            },
+            1,
+        )
+        .await
+        .expect("real pinned FsStore actor and bounded child owner");
+
+        let cancelled = AtomicBool::new(false);
+        let (_accepted, held_permit) = active
+            .stage(identity, range(), &wire, &cancelled)
+            .await
+            .expect("stage independently authenticated Bao under live permit");
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.arg("--exact")
+            .arg(NAME)
+            .arg("--nocapture")
+            .env(CHILD_ENV, &root);
+        let child_id = active
+            .spawn_unarmed(cmd)
+            .expect("register actual OS child before any writable file access");
+        assert!(
+            !root.join(MARKER).exists(),
+            "no file access before first-party child ARM"
+        );
+        active.arm(child_id).expect("arm only the owned child");
+        let started = std::time::Instant::now();
+        while !root.join(MARKER).exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "registered child did not open and sync writable file"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let closing = active
+            .begin_closing()
+            .unwrap_or_else(|(_, error)| panic!("cannot jointly close admissions: {error}"));
+        // The actual pinned FsStore owner, not the marker, is still the
+        // decisive OS lock. No second writer is admitted during Closing.
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref error) if error.kind() == io::ErrorKind::WouldBlock
+            ),
+            "registered-child cleanup may not release actor custody"
+        );
+        let mut closing = match closing.finish().await {
+            Ok(_) => panic!("live registered child cannot mint quiescence"),
+            Err((closing, error)) => {
+                assert!(error.contains("child close/join not proven"), "{error}");
+                closing
+            }
+        };
+        let joined = closing
+            .reap_registered_children(Duration::from_secs(15))
+            .expect("native OS child must be forcibly reaped, not just detached");
+        assert_eq!(joined.count, 1);
+        let closing = match closing.finish().await {
+            Ok(_) => panic!("live Bao import permit cannot mint quiescence"),
+            Err((closing, error)) => {
+                assert!(error.contains("permits have not drained"), "{error}");
+                closing
+            }
+        };
+        drop(held_permit);
+        let quiescent = closing
+            .finish()
+            .await
+            .unwrap_or_else(|(_, e)| panic!("actual actor shutdown failed: {e}"));
+        assert!(quiescent.admissions_drained().unwrap());
+        assert!(
+            matches!(
+                StoreLease::acquire(&root),
+                Err(ref error) if error.kind() == io::ErrorKind::WouldBlock
+            ),
+            "quiescence keeps real OS custody until explicit clean close"
+        );
+        let physical = audit_clean_closed_fixture(&root, identity, range())
+            .expect("authenticate physical sparse Bao after actual actor shutdown");
+        assert_eq!(physical, payload[START as usize..END as usize]);
+        assert!(
+            read_candidates(
+                quiescent.owner(),
+                identity.manifest.id.0,
+                identity.manifest.size,
+                IROH_PREORDER_16K,
+            )
+            .unwrap()
+            .is_empty(),
+            "child OS exit and actor shutdown must not mint a checkpoint"
+        );
+        quiescent.finish_clean(); // ordinary OS file close; never LOCK_UN
+
+        let new_owner = StoreLease::acquire(&root)
+            .expect("cleanly terminated actor and children permit new OS custody");
+        let reopened = FsStore::load(&root).await.expect("cold reopen real FsStore");
+        let after = audit_clean_closed_fixture(&root, identity, range())
+            .expect("reopened actor must preserve root-authenticated sparse Bao");
+        assert_eq!(after, physical);
+        reopened.shutdown().await.expect("reopened actor shutdown");
+        drop(reopened);
+        drop(new_owner);
+        fs::remove_dir_all(&root).expect("remove only disposable test root");
+        println!(
+            "STY_G2_05H3D real_fsstore=true registered_writable_os_child=true \
+             child_join_before_actor_shutdown=true real_actor_shutdown=true \
+             physical_bao_reaudited=true checkpoint_minted=false \
+             production_supervisor=false file_gate=false"
+        );
+    })
+    .await
+    .expect("bounded registered-child/actor joint shutdown test");
+}
+
