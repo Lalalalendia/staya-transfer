@@ -34,6 +34,16 @@ fn main() {
         }
     };
     guard.validate_fence().expect("fresh lease identity");
+    if mode == "arm-hold" {
+        // A disposable fixture handshake, not a persistent checkpoint or
+        // a grant. Parent must NOT race the one-shot child try_lock.
+        // The test subsequently verifies actual OS exclusion independently.
+        std::fs::write(
+            std::path::Path::new(&root).join(".g2-05h3c-fixture-lease-held"),
+            b"acquired",
+        )
+        .expect("publish lab-only ownership readiness");
+    }
     println!("ACQUIRED");
     io::stdout().flush().unwrap();
 

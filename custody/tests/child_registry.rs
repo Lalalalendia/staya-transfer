@@ -32,18 +32,26 @@ fn waiting_child(root: &Path) -> Command {
 }
 
 fn expect_child_owns_store(root: &Path) {
+    // The fixture child performs a ONE-SHOT nonblocking OS lock acquisition.
+    // Probing too early can briefly win custody and cause the child to exit
+    // BUSY. Wait for a post-acquire, disposable marker first; this marker
+    // alone is never trusted as ownership or as a checkpoint.
+    let marker = root.join(".g2-05h3c-fixture-lease-held");
     let started = Instant::now();
-    loop {
-        match StoreLease::acquire(root) {
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-            Ok(lease) => drop(lease),
-            Err(e) => panic!("unexpected custody error: {e}"),
-        }
+    while !marker.is_file() {
         assert!(
             started.elapsed() < Duration::from_secs(15),
-            "ARM child failed to acquire real OS custody"
+            "armed child never reported successful OS acquisition"
         );
         thread::sleep(Duration::from_millis(10));
+    }
+    match StoreLease::acquire(root) {
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+        Ok(owner) => {
+            drop(owner);
+            panic!("fixture marker present without an exclusive live OS writer");
+        }
+        Err(e) => panic!("unexpected competing OS custody error: {e}"),
     }
 }
 

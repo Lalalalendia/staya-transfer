@@ -67,9 +67,24 @@ impl WriterProcessRegistry {
                 "invalid writer registry capacity",
             ));
         }
-        let registry_id = NEXT_REGISTRY_ID
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-            .map_err(|_| io::Error::other("registry owner identity exhausted: HOLD"))?;
+        // Stable on the declared Rust 1.91 MSRV. A checked CAS loop never
+        // wraps the counter, even with concurrent registry constructors.
+        // fetch_update is deprecated by newer toolchains; try_update needs 1.95.
+        let mut observed = NEXT_REGISTRY_ID.load(Ordering::Relaxed);
+        let registry_id = loop {
+            let next = observed
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("registry owner identity exhausted: HOLD"))?;
+            match NEXT_REGISTRY_ID.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break observed,
+                Err(actual) => observed = actual,
+            }
+        };
         Ok(Self {
             registry_id,
             max_children,
