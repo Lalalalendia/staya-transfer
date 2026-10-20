@@ -53,3 +53,17 @@ path = "../staya_direct_preview.rs"
 [[test]]
 name = "staya_direct_preview_gate"
 path = "../staya_direct_preview_gate.rs"
+
+[[bin]]
+name = "staya-store-worker"
+path = "../staya_store_worker.rs"
+
+[[test]]
+name = "staya_store_worker_gate"
+path = "../staya_store_worker_gate.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+staya-native-parent-lab = { path = "../../native-host" }
+
+[target.'cfg(windows)'.dependencies]
+staya-windows-job-lab = { path = "../../native-windows-host" }

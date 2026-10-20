@@ -3047,6 +3047,8 @@ dependencies = [
 name = "staya-iroh-fork-compat"
 version = "0.0.0"
 dependencies = [
+ "staya-native-parent-lab",
+ "staya-windows-job-lab",
  "bao-tree",
  "blake3",
  "iroh",
@@ -3056,6 +3058,14 @@ dependencies = [
  "staya-transfer",
  "tokio",
 ]
+
+[[package]]
+name = "staya-native-parent-lab"
+version = "0.0.0"
+
+[[package]]
+name = "staya-windows-job-lab"
+version = "0.0.0"
 
 [[package]]
 name = "staya-transfer"
