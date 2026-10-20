@@ -11,7 +11,10 @@ use std::{
 const WAIT: Duration = Duration::from_secs(12);
 
 fn fixture(case: &str) -> PathBuf {
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let root = env::temp_dir().join(format!(
         "staya-g2-linux-ipc-{}-{case}-{nonce}",
         std::process::id()
@@ -55,7 +58,10 @@ impl Drop for KillLauncher {
 fn real_own_fd_and_kernel_credentials_gate_child_before_arm() -> io::Result<()> {
     let root = fixture("authenticated");
     let unarmed = spawn_unarmed(command(&root, std::process::id()))?;
-    assert!(!root.join("ipc-worker-armed").exists(), "worker ran before ARM");
+    assert!(
+        !root.join("ipc-worker-armed").exists(),
+        "worker ran before ARM"
+    );
     let pidfd = PidFd::open(unarmed.process_id())?;
     assert!(!pidfd.exited(0)?);
     let armed = unarmed.arm()?;
@@ -64,7 +70,10 @@ fn real_own_fd_and_kernel_credentials_gate_child_before_arm() -> io::Result<()> 
         fs::read(root.join("ipc-worker-armed"))?,
         b"SO_PEERCRED_PID_UID_GID_NONCE_ACK"
     );
-    assert!(!pidfd.exited(0)?, "kernel-backed worker unexpectedly exited");
+    assert!(
+        !pidfd.exited(0)?,
+        "kernel-backed worker unexpectedly exited"
+    );
     let status = armed.terminate_and_reap()?;
     assert!(!status.success());
     assert!(pidfd.exited(5000)?);

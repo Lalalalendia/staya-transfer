@@ -71,12 +71,10 @@ fn parse_frame(
     expected_kind: u8,
     expected_nonce: Option<&[u8; 32]>,
 ) -> io::Result<[u8; 32]> {
-    if data[..4] != MAGIC
-        || data[4..6] != VERSION
-        || data[6] != expected_kind
-        || data[7] != 0
-    {
-        return Err(deny("wrong IPC magic, version, command or reserved flags: HOLD"));
+    if data[..4] != MAGIC || data[4..6] != VERSION || data[6] != expected_kind || data[7] != 0 {
+        return Err(deny(
+            "wrong IPC magic, version, command or reserved flags: HOLD",
+        ));
     }
     let mut nonce = [0u8; 32];
     nonce.copy_from_slice(&data[8..]);
@@ -90,8 +88,7 @@ fn require_socket_creator(fd: RawFd, expected_parent: u32) -> io::Result<()> {
     let expected_pid =
         c_int::try_from(expected_parent).map_err(|_| deny("parent PID out of range"))?;
     let mut identity = UCred::default();
-    let mut length =
-        u32::try_from(size_of::<UCred>()).map_err(|_| deny("ucred size too large"))?;
+    let mut length = u32::try_from(size_of::<UCred>()).map_err(|_| deny("ucred size too large"))?;
     // SAFETY: the initialized ucred structure and length are valid writable
     // output buffers. Linux SO_PEERCRED reports kernel credentials captured
     // at the creation of the connected socketpair, not caller-provided text.
@@ -115,7 +112,9 @@ fn require_socket_creator(fd: RawFd, expected_parent: u32) -> io::Result<()> {
         || identity.uid != unsafe { geteuid() }
         || identity.gid != unsafe { getegid() }
     {
-        return Err(deny("inherited IPC socket creator does not match parent PID/UID/GID"));
+        return Err(deny(
+            "inherited IPC socket creator does not match parent PID/UID/GID",
+        ));
     }
     Ok(())
 }
