@@ -1,7 +1,8 @@
 //! G2-05h3g: real pinned FsStore under Linux PDEATHSIG / Windows JobObject.
 //! Independent observer kills its launcher and verifies native worker death,
 //! cooperative OS lock reacquisition and physical Bao against trusted BLAKE3.
-//! Crash/lab evidence only: no secure IPC, clean shutdown or File Gate grant.
+//! Linux verifies kernel-bound IPC before store open; still no executable
+//! attestation, clean shutdown, durable grant or File Gate authorization.
 
 use bao_tree::{
     BaoTree, BlockSize, ByteRanges,
@@ -22,7 +23,7 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-use staya_native_parent_lab::linux::{PidFd, require_parent_death_before_exec};
+use staya_native_parent_lab::{ipc::spawn_unarmed, linux::PidFd};
 #[cfg(windows)]
 use staya_windows_job_lab::windows::{ProcessWatcher, SuspendedJobWorker};
 
@@ -60,7 +61,7 @@ fn launcher(root: &Path) -> io::Result<()> {
     let executable = Path::new(env!("CARGO_BIN_EXE_staya-store-worker"));
 
     #[cfg(target_os = "linux")]
-    let mut child = {
+    let linux_running = {
         let mut command = Command::new(executable);
         command
             .arg(root)
@@ -68,11 +69,15 @@ fn launcher(root: &Path) -> io::Result<()> {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
-        require_parent_death_before_exec(&mut command, process::id());
-        command.spawn()?
+        let unarmed = spawn_unarmed(command)?;
+        // The worker process exists but has not yet received private ARM.
+        if root.join(".staya-writer.lock").exists() || root.join("data").exists() {
+            return Err(io::Error::other("real FsStore opened before IPC ARM: HOLD"));
+        }
+        unarmed.arm()?
     };
     #[cfg(target_os = "linux")]
-    let pid = child.id();
+    let pid = linux_running.process_id();
 
     #[cfg(windows)]
     let running = {
@@ -93,14 +98,16 @@ fn launcher(root: &Path) -> io::Result<()> {
     #[cfg(windows)]
     let pid = running.process_id();
 
+    #[cfg(target_os = "linux")]
+    let worker_witness = PidFd::open(pid)?;
     publish(root, WORKER_PID, pid.to_string().as_bytes())?;
     let started = Instant::now();
     while !root.join(WORKER_READY).is_file() {
         #[cfg(target_os = "linux")]
-        if let Some(status) = child.try_wait()? {
-            return Err(io::Error::other(format!(
-                "native FsStore worker exited before readiness: {status}"
-            )));
+        if worker_witness.exited(0)? {
+            return Err(io::Error::other(
+                "IPC-authenticated real FsStore worker exited before readiness",
+            ));
         }
         #[cfg(windows)]
         if ProcessWatcher::open(pid)?.exited(0)? {
@@ -119,10 +126,12 @@ fn launcher(root: &Path) -> io::Result<()> {
     publish(root, LAUNCHER_READY, b"WORKER_OS_OWNED_REAL_FSSTORE")?;
     #[cfg(windows)]
     let _keep_job_owner = running;
+    #[cfg(target_os = "linux")]
+    let _keep_kernel_ipc_owner = linux_running;
     loop {
         #[cfg(target_os = "linux")]
-        if child.try_wait()?.is_some() {
-            return Err(io::Error::other("FsStore worker unexpectedly died"));
+        if worker_witness.exited(0)? {
+            return Err(io::Error::other("IPC-authenticated FsStore worker died"));
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -285,4 +294,87 @@ fn real_fsstore_native_containment_survives_parent_kill() {
         "STY_G2_05H3G native_parent_death=true real_fsstore=true \
          os_worker_exit=true independent_bao=true candidate_checkpoint=false file_gate=false"
     );
+}
+
+#[cfg(target_os = "linux")]
+fn disposable_ipc_root(case: &str) -> std::path::PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock for unique native IPC fixture")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "staya-g2-05h3g2-ipc-{}-{case}-{unique}",
+        process::id()
+    ));
+    assert!(!root.exists(), "no preexisting stores or user files");
+    fs::create_dir(&root).expect("create disposable native IPC fixture");
+    root
+}
+
+#[cfg(target_os = "linux")]
+fn real_ipc_worker_command(root: &Path, claimed_parent: u32) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_staya-store-worker"));
+    cmd.arg(root)
+        .arg(claimed_parent.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd
+}
+
+#[cfg(target_os = "linux")]
+fn assert_ipc_has_not_created_custody(root: &Path) {
+    assert!(
+        !root.join(".staya-writer.lock").exists(),
+        "StoreLease must not exist before kernel IPC ARM"
+    );
+    assert!(
+        !root.join("data").exists(),
+        "real pinned FsStore must not start before verified IPC"
+    );
+    assert!(
+        !root.join(WORKER_READY).exists(),
+        "unverified worker may not publish readiness"
+    );
+}
+
+/// A genuine worker exists, but withholding private ARM leaves custody
+/// unopened even after the child has had time to run.
+#[cfg(target_os = "linux")]
+#[test]
+fn real_fsstore_ipc_denies_unarmed_without_custody() {
+    let root = disposable_ipc_root("no-arm");
+    let child = spawn_unarmed(real_ipc_worker_command(&root, process::id()))
+        .expect("spawn actual unarmed FsStore binary");
+    thread::sleep(Duration::from_millis(120));
+    assert_ipc_has_not_created_custody(&root);
+    drop(child); // kill and reap unarmed OS worker, not a clean receipt
+    assert_ipc_has_not_created_custody(&root);
+    fs::remove_dir_all(root).expect("only own disposable data");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_fsstore_ipc_denies_wrong_parent_before_custody() {
+    let root = disposable_ipc_root("wrong-parent");
+    let child = spawn_unarmed(real_ipc_worker_command(&root, u32::MAX))
+        .expect("spawn first-party binary with wrong claimed creator");
+    assert!(
+        child.arm().is_err(),
+        "wrong creator PID must fail before StoreLease"
+    );
+    assert_ipc_has_not_created_custody(&root);
+    fs::remove_dir_all(root).expect("only own disposable data");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_fsstore_ipc_denies_missing_socket_before_custody() {
+    let root = disposable_ipc_root("missing-fd");
+    let status = real_ipc_worker_command(&root, process::id())
+        .status()
+        .expect("spawn a real worker without the inherited kernel socket");
+    assert!(!status.success(), "no IPC socket must fail closed");
+    assert_ipc_has_not_created_custody(&root);
+    fs::remove_dir_all(root).expect("only own disposable data");
 }

@@ -2,7 +2,8 @@
 //!
 //! This executable is a crash laboratory, NOT an installable Staya service.
 //! It deliberately has no clean CLOSE, network commands, or File Gate access.
-//! Every unexpected error aborts the whole process before unlocking custody.
+//! After custody begins, unexpected errors abort the whole process, not just
+//! its actor. Linux IPC rejection before custody exits without opening a lock.
 
 use iroh_blobs::store::fs::FsStore;
 use staya_custody_lab::StoreLease;
@@ -16,7 +17,7 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-use staya_native_parent_lab::linux::bind_actual_parent;
+use staya_native_parent_lab::ipc::receive_parent_arm;
 
 const READY: &str = ".g2-05h3g-fsstore-ready";
 // Pin above the Iroh default 16 KiB inline-outboard threshold.
@@ -70,12 +71,15 @@ async fn main() {
         abort_hold("arguments", "unexpected additional input");
     }
 
-    // The Linux launcher installed PR_SET_PDEATHSIG before exec, and worker
-    // checks a pidfd before opening FsStore. This still does NOT prove a
-    // non-forgeable original-parent identity on all kernels.
+    // G2-05h3g2: Linux cannot open StoreLease until the anonymous inherited
+    // socket has proven SO_PEERCRED, live parent pidfd, versioned ARM and ACK.
+    // This is still not executable attestation or a signed file grant.
     #[cfg(target_os = "linux")]
-    let _parent_witness =
-        bind_actual_parent(parent).unwrap_or_else(|e| abort_hold("parent-binding", e));
+    let _parent_witness = receive_parent_arm(parent).unwrap_or_else(|error| {
+        // No StoreLease, FsStore actor or writable user data exists yet.
+        eprintln!("STY_G2_05H3G2_HOLD stage=ipc-before-custody error={error}");
+        process::exit(73);
+    });
     #[cfg(windows)]
     let _ = parent; // Containment on Windows belongs to the suspended Job launcher.
 
