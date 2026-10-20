@@ -1,0 +1,59 @@
+name: STY-G1g distinct Docker network direct QUIC preview
+on:
+  pull_request:
+    paths:
+      - 'interop/**'
+      - '.github/workflows/g1g-isolated-network-preview.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sty-g1g-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  direct-isolated-network:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [release, fork]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Confirm real Docker network namespace capability
+        run: |
+          set -euo pipefail
+          docker info >/dev/null
+          python3 --version
+      - name: Build exact pinned manual preview
+        run: cargo build --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --bin staya-direct-preview
+      - name: Direct Iroh QUIC across distinct isolated Docker namespaces
+        run: |
+          set -euo pipefail
+          python3 interop/docker/two_network_gate.py \
+            --binary interop/${{ matrix.variant }}/target/debug/staya-direct-preview \
+            --variant ${{ matrix.variant }} \
+            --output g1g-artifact
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: g1g-network-${{ matrix.variant }}
+          path: g1g-artifact/inventory.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  compare-variants:
+    needs: direct-isolated-network
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: g1g-network-*
+          path: g1g-network
+      - name: Compare independent release/fork network proof inventories
+        run: |
+          set -euo pipefail
+          cmp g1g-network/g1g-network-release/inventory.txt g1g-network/g1g-network-fork/inventory.txt
+          echo STY_G1G_TWO_DOCKER_NETWORK_SPACES_RELEASE_FORK_IDENTICAL=true
