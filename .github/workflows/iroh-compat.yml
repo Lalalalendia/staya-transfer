@@ -62,6 +62,8 @@ jobs:
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_supervised_quiescence_blocks_early_handoff_and_reaudits_bao --nocapture
+      - name: STY-G2-05h3g6 real pending load/shutdown cancellation OS fence
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_async_cancel_gate -- --exact real_polled_fsstore_load_and_shutdown_cancellation_retains_os_custody --nocapture
       - name: STY-G2-05h2 abandoned FsStore actor holds lease until OS process exit
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}

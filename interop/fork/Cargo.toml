@@ -67,3 +67,7 @@ staya-native-parent-lab = { path = "../../native-host" }
 
 [target.'cfg(windows)'.dependencies]
 staya-windows-job-lab = { path = "../../native-windows-host" }
+
+[[test]]
+name = "fsstore_async_cancel_gate"
+path = "../fsstore_async_cancel_gate.rs"
