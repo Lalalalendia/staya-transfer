@@ -75,6 +75,10 @@ jobs:
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_os_process_supervisor_clean_and_kill --nocapture
+      - name: STY-G2-05h3d registered writable child join before real actor quiescence
+        env:
+          STY_INTEROP_VARIANT: ${{ matrix.variant }}
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_partial_gate -- --exact real_fsstore_registered_child_join_precedes_actor_quiescence --nocapture
       - name: STY-G2-05h3b real parent hard-kill and orphaned FsStore owner
         env:
           STY_INTEROP_VARIANT: ${{ matrix.variant }}
