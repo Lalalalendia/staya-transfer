@@ -47,6 +47,10 @@ jobs:
             '.github/workflows/owner-anchor-gate.yml',
             '.github/workflows/owner-ledger-cas.yml',
             '.github/workflows/owner-witness.yml',
+            'interop/owner-witness-lab/owner_signed_transition.go',
+            'interop/owner-witness-lab/owner_signed_transition_test.go',
+            'docs/ADR-0031-signed-deny-transition-gateway.md',
+            '.github/workflows/owner-signed-deny.yml',
           }
           assert actual==expected, ('out of approved research scope',actual^expected)
           assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in actual)

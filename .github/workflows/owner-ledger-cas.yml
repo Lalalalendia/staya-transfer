@@ -66,7 +66,13 @@ jobs:
             'docs/ADR-0030-ydb-document-denial-cas.md',
             '.github/workflows/owner-ydb-cas.yml',
           }
-          assert actual in (expected, expected|anchor_layer, expected|anchor_layer|quorum_layer, expected|anchor_layer|quorum_layer|ydb_layer), (
+          signed_layer={
+            'interop/owner-witness-lab/owner_signed_transition.go',
+            'interop/owner-witness-lab/owner_signed_transition_test.go',
+            'docs/ADR-0031-signed-deny-transition-gateway.md',
+            '.github/workflows/owner-signed-deny.yml',
+          }
+          assert actual in (expected, expected|anchor_layer, expected|anchor_layer|quorum_layer, expected|anchor_layer|quorum_layer|ydb_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer), (
               'unknown/nonconsecutive lab scope',actual
           )
           assert not any(n.startswith(('src/','custody/','interop/fork/')) for n in actual)
