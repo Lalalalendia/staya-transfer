@@ -174,11 +174,25 @@ func AppendOwnerDeny(path string, installation, vault, replica [16]byte, expecte
 	if err != nil {
 		return Head{}, err
 	}
+	after, err := appendDenyLocked(f, state, replica, expectedGlobal, expectedFloor)
+	if err != nil {
+		return Head{}, err
+	}
+	return after.head, nil
+}
+
+// appendDenyLocked MUST only be called while f's OS lock and path-identity
+// fence remain held. Both anchored/unanchored flows share identical bytes,
+// sync, complete same-handle replay and conditional advance.
+func appendDenyLocked(f *os.File, state ledgerState, replica [16]byte, expectedGlobal, expectedFloor uint64) (ledgerState, error) {
+	if replica == [16]byte{} {
+		return ledgerState{}, ErrLedgerHold
+	}
 	if state.head.Epoch != expectedGlobal || state.floors[replica] != expectedFloor {
-		return Head{}, ErrLedgerStaleCAS
+		return ledgerState{}, ErrLedgerStaleCAS
 	}
 	if state.head.Epoch >= maxLedgerRecords || expectedFloor == math.MaxUint64 {
-		return Head{}, ErrLedgerExhausted
+		return ledgerState{}, ErrLedgerExhausted
 	}
 	var row [ledgerRecordSize]byte
 	binary.LittleEndian.PutUint64(row[:8], expectedGlobal+1)
@@ -191,14 +205,14 @@ func AppendOwnerDeny(path string, installation, vault, replica [16]byte, expecte
 	copy(row[80:112], digest[:])
 	n, err := f.WriteAt(row[:], state.size)
 	if err != nil || n != len(row) {
-		return Head{}, ErrLedgerHold
+		return ledgerState{}, ErrLedgerHold
 	}
 	if err = f.Sync(); err != nil {
-		return Head{}, ErrLedgerHold
+		return ledgerState{}, ErrLedgerHold
 	}
-	after, err := parseLedger(f, installation, vault)
+	after, err := parseLedger(f, state.head.Installation, state.head.Vault)
 	if err != nil || after.head.Epoch != expectedGlobal+1 || after.floors[replica] != expectedFloor+1 || after.previous != digest {
-		return Head{}, ErrLedgerHold
+		return ledgerState{}, ErrLedgerHold
 	}
-	return after.head, nil
+	return after, nil
 }
