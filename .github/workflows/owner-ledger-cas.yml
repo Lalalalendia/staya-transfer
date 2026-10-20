@@ -84,7 +84,13 @@ jobs:
             'interop/owner-witness-lab/owner_two_authority.go',
             'interop/owner-witness-lab/owner_two_authority_test.go',
           }
-          assert actual in (expected, expected|anchor_layer, expected|anchor_layer|quorum_layer, expected|anchor_layer|quorum_layer|ydb_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer|writer_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer|writer_layer|two_layer), (
+          worm_layer={
+            'interop/owner-witness-lab/owner_worm_audit.go',
+            'interop/owner-witness-lab/owner_worm_audit_test.go',
+            'docs/ADR-0034-s3-compliance-worm-read-only.md',
+            '.github/workflows/owner-worm-audit.yml',
+          }
+          assert actual in (expected, expected|anchor_layer, expected|anchor_layer|quorum_layer, expected|anchor_layer|quorum_layer|ydb_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer|writer_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer|writer_layer|two_layer, expected|anchor_layer|quorum_layer|ydb_layer|signed_layer|writer_layer|two_layer|worm_layer), (
               'unknown/nonconsecutive lab scope',actual
           )
           assert not any(n.startswith(('src/','custody/','interop/fork/')) for n in actual)
