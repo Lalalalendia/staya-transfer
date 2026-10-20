@@ -95,7 +95,10 @@ fn racing_spawn_and_close_never_enable_post_close_arm() {
         }
         let outstanding = registry.active_children().unwrap();
         assert_eq!(
-            registry.close_and_reap(Duration::from_secs(15)).unwrap().count,
+            registry
+                .close_and_reap(Duration::from_secs(15))
+                .unwrap()
+                .count,
             outstanding
         );
         assert_eq!(registry.active_children().unwrap(), 0);
@@ -136,7 +139,10 @@ fn writer_id_is_bound_to_its_registry_and_cannot_arm_another_session() {
     let b = WriterProcessRegistry::new(1).unwrap();
     let a_id = a.spawn_unarmed(waiting_child(&a_root)).unwrap();
     let b_id = b.spawn_unarmed(waiting_child(&b_root)).unwrap();
-    assert_ne!(a_id, b_id, "separate registries must not reuse ARM identities");
+    assert_ne!(
+        a_id, b_id,
+        "separate registries must not reuse ARM identities"
+    );
     assert!(a.arm(b_id).is_err(), "wrong-registry ARM must be denied");
     assert!(b.arm(a_id).is_err(), "wrong-registry ARM must be denied");
     // Cross-registry denial must NOT disturb the correctly registered worker.

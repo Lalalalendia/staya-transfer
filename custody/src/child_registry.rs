@@ -9,7 +9,10 @@ use std::{
     collections::HashMap,
     io::{self, Write},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{atomic::{AtomicU64, Ordering}, Mutex, MutexGuard},
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -143,7 +146,11 @@ impl WriterProcessRegistry {
         if entry.child.try_wait()?.is_some() {
             return Err(deny("child exited before ARM"));
         }
-        if let Err(err) = entry.control.write_all(b"A").and_then(|_| entry.control.flush()) {
+        if let Err(err) = entry
+            .control
+            .write_all(b"A")
+            .and_then(|_| entry.control.flush())
+        {
             state.accepting = false;
             return Err(err);
         }
