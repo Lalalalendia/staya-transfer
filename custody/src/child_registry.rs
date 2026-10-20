@@ -68,7 +68,7 @@ impl WriterProcessRegistry {
             ));
         }
         let registry_id = NEXT_REGISTRY_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| io::Error::other("registry owner identity exhausted: HOLD"))?;
         Ok(Self {
             registry_id,
