@@ -234,9 +234,20 @@ def main():
             assert path.startswith("/tmp/staya-direct-preview-receiver-")
             assert path.endswith("/verified-staged.bin")
 
-            received = temp / "received.bin"
-            command("docker", "cp", f"{containers[0]}:{path}", str(received))
-            content = received.read_bytes()
+            # Docker daemon's copy API does not resolve this tmpfs path
+            # reliably, even while the container stays alive. Independently
+            # read it as the same unprivileged UID from a separate OS process
+            # inside the actual receiver's still-mounted namespace.
+            reading = subprocess.run(
+                ["docker", "exec", containers[0], "cat", path],
+                capture_output=True, timeout=90
+            )
+            if reading.returncode:
+                raise AssertionError(
+                    "receiver's independent physical stage read failed: "
+                    + reading.stderr.decode("utf-8", errors="replace")[-800:]
+                )
+            content = reading.stdout
             assert content == payload, "network-isolated receiver staged incorrect bytes"
             # Only release the CI wrapper after independently reading the
             # actual file while the receiver's private tmpfs remains mounted.
