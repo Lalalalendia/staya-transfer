@@ -51,7 +51,7 @@ pub struct WriterProcessRegistry {
 
 impl WriterProcessRegistry {
     pub fn new(max_children: usize) -> io::Result<Self> {
-        if max_children == 0 || max_children > MAX_CHILDREN {
+        if !(1..=MAX_CHILDREN).contains(&max_children) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid writer registry capacity",
@@ -156,12 +156,11 @@ impl WriterProcessRegistry {
         state.accepting = false;
         let count = state.children.len();
         for entry in state.children.values_mut() {
-            if entry.child.try_wait()?.is_none() {
-                if let Err(err) = entry.child.kill() {
-                    if entry.child.try_wait()?.is_none() {
-                        return Err(err);
-                    }
-                }
+            if entry.child.try_wait()?.is_none()
+                && let Err(err) = entry.child.kill()
+                && entry.child.try_wait()?.is_none()
+            {
+                return Err(err);
             }
         }
         loop {
