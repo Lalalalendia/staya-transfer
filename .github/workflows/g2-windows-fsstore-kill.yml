@@ -43,7 +43,31 @@ jobs:
         run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1
       - name: Native Windows TerminateProcess + real FsStore + Bao restart audit
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_crash_gate -- --exact real_fsstore_kill_reopen_candidate_gate --nocapture
+      - name: STY-G2-06d Windows TerminateProcess safe full QUIC re-download
+        env:
+          STY_G2_06D_OUTPUT_DIR: ${{ github.workspace }}/g2-06d-evidence
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_network_get -- --exact windows_terminated_receiver_requires_new_full_quic_transfer --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-terminate-quic-${{ matrix.variant }}
+          path: g2-06d-evidence/
+          if-no-files-found: error
       - name: Strict Windows integration lint
         run: cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --all-targets -- -D warnings
       - name: Windows integration format
         run: cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
+
+  windows-terminate-quic-byte-compare:
+    needs: native-fsstore-terminate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: windows-terminate-quic-*
+          path: compare
+      - name: Compare Windows release and fork actual QUIC Bao bytes
+        run: |
+          cmp compare/windows-terminate-quic-release/inventory.txt compare/windows-terminate-quic-fork/inventory.txt
+          cmp compare/windows-terminate-quic-release/first.wire compare/windows-terminate-quic-fork/first.wire
+          cmp compare/windows-terminate-quic-release/redownload.wire compare/windows-terminate-quic-fork/redownload.wire
+          echo STY_G2_06D_WINDOWS_SAFE_QUIC_FALLBACK_RELEASE_FORK_IDENTICAL=true
