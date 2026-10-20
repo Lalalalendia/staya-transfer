@@ -102,6 +102,14 @@ func inspectWORMVersion(v LockedWORMVersion, owner ed25519.PublicKey, inst, vaul
 	if dec.Decode(&extra) != io.EOF || rec.Schema != wormSchema {
 		return zero, ErrAnchorHold
 	}
+	// Disallow duplicate keys, alternative field ordering, insignificant
+	// whitespace and escaped spellings. Ed25519 signs semantic checkpoint
+	// bytes, so a second JSON implementation must not see a different record.
+	// Go's wormSignedRecord field order is the protocol's canonical wire form.
+	canonical, err := json.Marshal(rec)
+	if err != nil || !bytes.Equal(canonical, v.Payload) {
+		return zero, ErrAnchorHold
+	}
 	installation, okI := strictWORMHex(rec.Installation, 16)
 	vlt, okV := strictWORMHex(rec.Vault, 16)
 	digest, okD := strictWORMHex(rec.DenyDigest, 32)
@@ -221,7 +229,8 @@ type wormS3VersionList struct {
 		VersionId string
 		IsLatest  bool
 	}
-	IsTruncated         bool
+	// A missing IsTruncated is UNKNOWN, never proof of completeness.
+	IsTruncated         *bool
 	NextKeyMarker       string
 	NextVersionIdMarker string
 }
@@ -278,7 +287,7 @@ func (p ReadOnlyObjectLockPreflight) Read(ctx context.Context) ([]LockedWORMVers
 		var listing wormS3VersionList
 		data, err := p.query(ctx, 1024*1024, "list-object-versions", "--bucket", p.Bucket,
 			"--prefix", p.Key, "--max-keys", "129", "--no-paginate")
-		if err != nil || json.Unmarshal(data, &listing) != nil || listing.IsTruncated ||
+		if err != nil || json.Unmarshal(data, &listing) != nil || listing.IsTruncated == nil || *listing.IsTruncated ||
 			listing.NextKeyMarker != "" || listing.NextVersionIdMarker != "" ||
 			len(listing.Versions)+len(listing.DeleteMarkers) > wormMaxVersions {
 			return wormS3VersionList{}, ErrAnchorHold

@@ -273,15 +273,17 @@ case "$*" in
 *get-bucket-versioning*) echo '{"Status":"Enabled"}' ;;
 *get-object-lock-configuration*) echo '{"ObjectLockConfiguration":{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Days":300}}}}' ;;
 *list-object-versions*)
-    if [ "${STY_FAKE_AWS_MUTATE_LISTING:-0}" = 1 ]; then
+    if [ "${STY_FAKE_AWS_MISSING_IS_TRUNCATED:-0}" = 1 ]; then
+      echo '{"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}'
+    elif [ "${STY_FAKE_AWS_MUTATE_LISTING:-0}" = 1 ]; then
       if [ -f "$STY_FAKE_AWS_ROOT/list_seen" ]; then
-        echo '{"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":false,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":true,"Size":440}]}'
+        echo '{"IsTruncated":false,"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":false,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":true,"Size":440}]}'
       else
         : > "$STY_FAKE_AWS_ROOT/list_seen"
-        echo '{"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}'
+        echo '{"IsTruncated":false,"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}'
       fi
     else
-      echo '{"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}'
+      echo '{"IsTruncated":false,"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}'
     fi ;;
 *get-object-retention*) echo '{"Retention":{"Mode":"COMPLIANCE","RetainUntilDate":"2027-08-20T12:00:00Z"}}' ;;
 *get-object*)
@@ -337,6 +339,12 @@ esac`
 	if gets != 3 || puts != 0 {
 		t.Fatalf("expected read-only real HTTPS YDB requests, got reads=%d writes=%d", gets, puts)
 	}
+	// Omitting IsTruncated cannot be treated as an explicitly complete S3
+	// page. JSON zero-value false would previously accept this mock.
+	t.Setenv("STY_FAKE_AWS_MISSING_IS_TRUNCATED", "1")
+	if err := RunReadOnlyWORMPreflight(ctx, reader, pub, ydb, next, next, now); !errors.Is(err, ErrAnchorHold) {
+		t.Fatalf("S3 list missing IsTruncated was treated as complete: %v", err)
+	}
 }
 
 // An attacker may legally delete an expired newer Object Lock version. A
@@ -383,4 +391,47 @@ func (r *changingWORMYDB) Read(ctx context.Context, inst, vault [16]byte) (Denia
 		return r.first, nil
 	}
 	return r.second, nil
+}
+
+// The wire format of an owner-signed WORM record must have one unambiguous
+// canonical representation. The signature is over semantic checkpoint bytes;
+// a second parser could otherwise interpret reordered/duplicated JSON keys
+// differently without invalidating the Ed25519 signature.
+func TestWORMRejectsNoncanonicalAndDuplicateJSONFields(t *testing.T) {
+	pub, versions, _, next, now := wormFixture(t)
+	original := string(versions[0].Payload)
+	var record wormSignedRecord
+	if err := json.Unmarshal(versions[0].Payload, &record); err != nil {
+		t.Fatal(err)
+	}
+	// json.Marshal(map) sorts map keys, unlike the canonical struct order.
+	alternative, err := json.Marshal(map[string]string{
+		"schema": record.Schema, "installation": record.Installation, "vault": record.Vault,
+		"epoch": record.Epoch, "deny_digest": record.DenyDigest,
+		"commitment": record.Commitment, "previous": record.Previous,
+		"signature": record.Signature,
+	})
+	if err != nil || string(alternative) == original {
+		t.Fatal("test did not construct an alternate semantic-equivalent JSON")
+	}
+	duplicated := strings.Replace(original,
+		`"schema":"akula-deny-worm-v1"`,
+		`"schema":"akula-deny-worm-v1","schema":"akula-deny-worm-v1"`, 1)
+	if duplicated == original {
+		t.Fatal("test did not construct duplicate key")
+	}
+	for name, payload := range map[string]string{
+		"prefix-whitespace": " " + original,
+		"trailing-newline":  original + "\n",
+		"duplicate-schema":  duplicated,
+		"reordered-fields":  string(alternative),
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := append([]LockedWORMVersion(nil), versions...)
+			changed[0].Payload = []byte(payload)
+			if err := ObserveYDBAgainstWORMWithPin(changed, pub, next, next, now, 7*24*time.Hour); !errors.Is(err, ErrAnchorHold) {
+				t.Fatalf("noncanonical signed JSON record was accepted: %v", err)
+			}
+		})
+	}
 }
