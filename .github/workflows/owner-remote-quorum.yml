@@ -49,7 +49,13 @@ jobs:
             '.github/workflows/owner-anchor-gate.yml',
             'docs/ADR-0029-two-remote-denial-witnesses.md',
           }
-          assert changes==expected, ('forbidden path or incomplete read-only research layer',changes^expected)
+          ydb_layer={
+            'interop/owner-witness-lab/owner_ydb_docapi.go',
+            'interop/owner-witness-lab/owner_ydb_docapi_test.go',
+            'docs/ADR-0030-ydb-document-denial-cas.md',
+            '.github/workflows/owner-ydb-cas.yml',
+          }
+          assert changes in (expected, expected|ydb_layer), ('forbidden path or incomplete YDB research layer',changes)
           assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in changes)
           PY
           git diff --check

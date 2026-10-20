@@ -1,0 +1,71 @@
+name: STY YDB Document API conditional deny checkpoint lab
+
+on:
+  push:
+    branches: ["experiment/sty-online-owner-ydb-*" ]
+  pull_request:
+    paths:
+      - "interop/owner-witness-lab/**"
+      - "docs/ADR-0030-ydb-document-denial-cas.md"
+      - ".github/workflows/owner-ydb-cas.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  document-api-wire-cas:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: Assert exact research-only child scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          base='7fec445473c047c1160b973e2429a6b2cc967bbe'
+          actual=set(subprocess.check_output(['git','diff','--name-only',base+'..HEAD'],text=True).splitlines())
+          expected={
+            'interop/owner-witness-lab/owner_ydb_docapi.go',
+            'interop/owner-witness-lab/owner_ydb_docapi_test.go',
+            'docs/ADR-0030-ydb-document-denial-cas.md',
+            '.github/workflows/owner-ydb-cas.yml',
+            '.github/workflows/owner-remote-quorum.yml',
+            '.github/workflows/owner-anchor-gate.yml',
+            '.github/workflows/owner-ledger-cas.yml',
+            '.github/workflows/owner-witness.yml',
+          }
+          assert actual==expected, ('out of approved research scope',actual^expected)
+          assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in actual)
+          PY
+          git diff --check
+      - name: HTTPS Document API CAS contract, failure and rollback tests
+        working-directory: interop/owner-witness-lab
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 ./...
+          go vet ./...
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            test -z "$(gofmt -l .)"
+            go test -race -count=1 ./...
+          fi
+      - name: Explicitly retain antirollback / product HOLD
+        shell: bash
+        run: |
+          echo 'YDB client tested only with local TLS mock, no cloud credentials or YDB deployment.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Document API CAS and ConsistentRead do not defend against privileged remote DB rollback.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No signed installed owner, complete grants policy, QUIC authority, File Gate or APPLIED.' >> "$GITHUB_STEP_SUMMARY"
