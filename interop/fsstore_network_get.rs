@@ -527,7 +527,7 @@ async fn linux_killed_receiver_redownloads_uncommitted_or_resumes_verified() {
     };
     use std::{
         io,
-        path::{Path, PathBuf},
+        path::PathBuf,
         process::{Child, Command, Stdio},
         sync::atomic::AtomicBool,
         thread,
