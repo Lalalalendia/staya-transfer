@@ -12,6 +12,11 @@ use std::{
 
 const WAIT: Duration = Duration::from_secs(45);
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+#[path = "windows_private_stage.rs"]
+mod windows_private_stage;
+
 struct OwnedProcess(Child);
 impl Drop for OwnedProcess {
     fn drop(&mut self) {
@@ -198,6 +203,20 @@ fn run_manual_preview(lab_drop: bool) {
         );
     }
     assert_eq!(fs::read(&staged).unwrap(), payload);
+    #[cfg(windows)]
+    {
+        windows_private_stage::verify_owner_only_staging_root(&staging_root)
+            .expect("Windows private root has explicit protected owner/System DACL");
+        windows_private_stage::verify_owner_only_staged_file(&staged)
+            .expect("Windows stage file inherited no broad user/group access");
+        windows_private_stage::prove_anonymous_file_read_denied(&staged)
+            .expect("different Windows anonymous principal must get ACCESS_DENIED");
+        println!("STY_G1J_ANONYMOUS_DATA_READ_DENIED=true");
+        assert!(
+            windows_private_stage::create_owner_only_directory(&staging_root).is_err(),
+            "existing path must never be reused or have its DACL widened"
+        );
+    }
     assert!(
         exited(&mut permitted.0).success(),
         "receiver OS process did not finish"

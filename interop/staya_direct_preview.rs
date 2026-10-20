@@ -2,7 +2,8 @@
 //! It only writes a random private staging directory. It is NOT Akula Sync,
 //! a File Gate publisher, an authenticated Device/Vault grant or durable resume.
 //! No secret key is persisted or sent through command-line arguments.
-#![forbid(unsafe_code)]
+// The only native Win32 FFI is in the audited platform-private module.
+#![deny(unsafe_code)]
 
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, endpoint::presets, protocol::Router,
@@ -36,6 +37,11 @@ use std::{
 
 #[path = "fsstore_partial_adapter.rs"]
 mod partial_adapter;
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+#[path = "windows_private_stage.rs"]
+mod windows_private_stage;
 
 const MAX_OBJECT: u64 = 8 * 1024 * 1024;
 const RANGE: u64 = 64 * 1024;
@@ -89,11 +95,14 @@ fn private_root(label: &str) -> Result<PathBuf, String> {
             return Err("staging directory must be owner-only mode 0700".into());
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // Windows inherits TEMP's ACL. This manual preview does NOT attest
-        // production-grade Windows local ACL isolation.
-        fs::create_dir(&root).map_err(|e| format!("staging directory: {e}"))?;
+        windows_private_stage::create_owner_only_directory(&root)
+            .map_err(|e| format!("explicit Windows private staging DACL: {e}"))?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        return Err("no safe private staging policy for this operating system".into());
     }
     Ok(root)
 }
@@ -426,6 +435,13 @@ async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
         .sync_all()
         .map_err(|e| format!("sync private stage: {e}"))?;
     drop(output);
+    #[cfg(windows)]
+    {
+        windows_private_stage::verify_owner_only_staging_root(&root)
+            .map_err(|e| format!("receiver protected Windows staging root: {e}"))?;
+        windows_private_stage::verify_owner_only_staged_file(&staged)
+            .map_err(|e| format!("receiver inherited private file ACL: {e}"))?;
+    }
     conn.close(0u8.into(), b"direct preview complete");
     ep.close().await;
     drop(owner);
