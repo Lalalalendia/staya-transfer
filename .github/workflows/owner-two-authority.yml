@@ -1,0 +1,75 @@
+name: STY two-authority DENY checkpoint rollback fence lab
+
+on:
+  push:
+    branches: ["experiment/sty-online-owner-two-authority-*"]
+  pull_request:
+    paths:
+      - "interop/owner-witness-lab/owner_two_authority.go"
+      - "interop/owner-witness-lab/owner_two_authority_test.go"
+      - "docs/ADR-0033-two-authority-deny-checkpoint.md"
+      - ".github/workflows/owner-two-authority.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dual-denial-checkpoint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: Exact inherited research-only layer, no product code
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          base='4413b1a25438d48f1dab0b2f9abe3b4ddbedfc0a'
+          changed=set(subprocess.check_output(['git','diff','--name-only',base+'..HEAD'],text=True).splitlines())
+          expected={
+            'interop/owner-witness-lab/owner_two_authority.go',
+            'interop/owner-witness-lab/owner_two_authority_test.go',
+            'docs/ADR-0033-two-authority-deny-checkpoint.md',
+            '.github/workflows/owner-two-authority.yml',
+            '.github/workflows/owner-mtls-writer.yml',
+            '.github/workflows/owner-signed-deny.yml',
+            '.github/workflows/owner-ydb-cas.yml',
+            '.github/workflows/owner-remote-quorum.yml',
+            '.github/workflows/owner-anchor-gate.yml',
+            '.github/workflows/owner-ledger-cas.yml',
+            '.github/workflows/owner-witness.yml',
+          }
+          assert changed == expected, ('unexpected/partial two-authority layer',changed^expected)
+          assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in changed)
+          PY
+          git diff --check
+      - name: Dual-CAS and actual TLS gateway rollback falsifiers
+        working-directory: interop/owner-witness-lab
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 ./...
+          go vet ./...
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            test -z "$(gofmt -l .)"
+            go test -race -count=1 ./...
+          fi
+      - name: Mandatory non-production / antirollback limits
+        shell: bash
+        run: |
+          echo 'Two Go CAS objects sharing CI runner do NOT prove independent administrative custody.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Dual rollback remains possible; primary/fence partial commit requires manual external recovery and HOLD.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No real YDB, immutable audit, file permission, P2P grant, File Gate, APPLIED or ACK.' >> "$GITHUB_STEP_SUMMARY"
