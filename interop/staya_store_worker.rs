@@ -19,7 +19,9 @@ use std::{
 use staya_native_parent_lab::linux::bind_actual_parent;
 
 const READY: &str = ".g2-05h3g-fsstore-ready";
-const OBJECT_SIZE: usize = 256 * 1024 + 17;
+// Pin above the Iroh default 16 KiB inline-outboard threshold.
+// A smaller object may have NO physical .obao4 by design.
+const OBJECT_SIZE: usize = 16 * 1024 * 1024 + 17;
 
 fn payload() -> Vec<u8> {
     (0..OBJECT_SIZE)
@@ -97,6 +99,18 @@ async fn main() {
     owner
         .validate_fence()
         .unwrap_or_else(|e| abort_hold("post-write-fence", e));
+    // The test is explicitly a physical .data/.obao4 crash audit. The
+    // upstream defaults may inline smaller outboards into the metadata DB,
+    // so require real files before publishing this fixture's readiness.
+    let hex = expected.to_hex().to_string();
+    let data_path = owner.canonical_root().join("data").join(format!("{hex}.data"));
+    let bao_path = owner
+        .canonical_root()
+        .join("data")
+        .join(format!("{hex}.obao4"));
+    if !data_path.is_file() || !bao_path.is_file() {
+        abort_hold("physical-sidecars", "pinned FsStore did not materialize data+outboard");
+    }
     publish_ready(owner.canonical_root(), expected.as_bytes())
         .unwrap_or_else(|e| abort_hold("ready-marker", e));
 

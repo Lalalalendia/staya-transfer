@@ -4,11 +4,13 @@ Parent: [supervisor #26](https://github.com/Lalalalendia/staya-transfer/issues/2
 
 ## Single actual writer process
 
-A **new binary** in the pinned release/fork interop crates starts **the real** \`iroh-blobs::FsStore\` after \`StoreLease::acquire\` in its own OS process. It writes a deterministic real object through \`FsStore::add_slice\`, validates the root, then retains the actor, tag and lock until the OS destroys the process. Unexpected worker errors/panics abort the entire OS process; they must not accidentally drop custody while an actor runs. No parent-held lock FD is transferred into the worker.
+A **new binary** in the pinned release/fork interop crates starts **the real** \`iroh-blobs::FsStore\` after \`StoreLease::acquire\` in its own OS process. It writes a 16 MiB + 17 byte deterministic real object through \`FsStore::add_slice\`, validates the root, asserts physical `.data` and `.obao4` are present before diagnostic READY, then retains the actor, tag and lock until the OS destroys the process. Unexpected worker errors/panics abort the entire OS process; they must not accidentally drop custody while an actor runs. No parent-held lock FD is transferred into the worker.
 
 - **Linux:** the separate launcher installs \`PR_SET_PDEATHSIG=SIGKILL\` before exec; the worker checks the actual parent through \`bind_actual_parent\`/pidfd **before** store acquisition. A third process holds a pidfd exit witness.
 - **Windows:** the launcher uses the existing \`SuspendedJobWorker -> AssignedJobWorker -> RunningJobWorker\` API. \`CREATE_SUSPENDED\` and assignment to a **noninheritable** \`KILL_ON_JOB_CLOSE\` Job Object precede \`ResumeThread\`. A third process holds a process-only wait handle, not a Job handle.
 - Both: after a true launcher hard-kill, the observer requires **native OS worker exit**, independently reacquires the store lock, audits real \`.data\`/\`.obao4\` bytes against a trusted BLAKE3 root, and verifies no checkpoint candidates. The root is a unique disposable CI fixture.
+
+The first CI attempt used only ~256 KiB. Iroh's default `max_outboard_inlined` is 16 KiB, so that small object's outboard legitimately stayed inside metadata; expecting a separate `.obao4` was an invalid test assumption. The larger fixture explicitly forces disk outboard storage. The resulting independent Bao audit is limited to the kernel-visible filesystem state, not an fsync/power-loss guarantee.
 
 ## Evidence gate
 

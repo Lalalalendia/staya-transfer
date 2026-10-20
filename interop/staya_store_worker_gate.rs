@@ -31,7 +31,9 @@ const TEST_NAME: &str = "real_fsstore_native_containment_survives_parent_kill";
 const WORKER_READY: &str = ".g2-05h3g-fsstore-ready";
 const WORKER_PID: &str = ".g2-05h3g-worker-pid";
 const LAUNCHER_READY: &str = ".g2-05h3g-launcher-ready";
-const OBJECT_SIZE: usize = 256 * 1024 + 17;
+// Exactly equal to the real worker's size; large enough to require a
+// physical outboard under both pinned FsStore variants.
+const OBJECT_SIZE: usize = 16 * 1024 * 1024 + 17;
 const START: u64 = 33_333;
 const END: u64 = 100_111;
 const DEADLINE: Duration = Duration::from_secs(65);
