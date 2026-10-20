@@ -58,10 +58,16 @@ unsafe extern "system" {
     fn LocalFree(ptr: *mut c_void) -> *mut c_void;
     fn CreateDirectoryW(path: *const u16, security: *const SecurityAttributes) -> i32;
     #[cfg(test)]
-    #[allow(dead_code, reason = "exercised by integration test crate, not the preview binary")]
+    #[allow(
+        dead_code,
+        reason = "exercised by integration test crate, not the preview binary"
+    )]
     fn GetCurrentThread() -> Handle;
     #[cfg(test)]
-    #[allow(dead_code, reason = "exercised by integration test crate, not the preview binary")]
+    #[allow(
+        dead_code,
+        reason = "exercised by integration test crate, not the preview binary"
+    )]
     fn CreateFileW(
         name: *const u16,
         desired_access: u32,
@@ -77,10 +83,16 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
     #[cfg(test)]
-    #[allow(dead_code, reason = "exercised by integration test crate, not the preview binary")]
+    #[allow(
+        dead_code,
+        reason = "exercised by integration test crate, not the preview binary"
+    )]
     fn ImpersonateAnonymousToken(thread: Handle) -> i32;
     #[cfg(test)]
-    #[allow(dead_code, reason = "exercised by integration test crate, not the preview binary")]
+    #[allow(
+        dead_code,
+        reason = "exercised by integration test crate, not the preview binary"
+    )]
     fn RevertToSelf() -> i32;
     fn GetTokenInformation(
         token: Handle,
@@ -408,7 +420,10 @@ pub fn verify_owner_only_staging_root(path: &Path) -> io::Result<()> {
 /// anonymous impersonation after a failed syscall. A missing file or failure
 /// to impersonate is NOT evidence of a protective DACL.
 #[cfg(test)]
-#[allow(dead_code, reason = "integration gate uses this on Windows; preview bin does not")]
+#[allow(
+    dead_code,
+    reason = "integration gate uses this on Windows; preview bin does not"
+)]
 pub fn prove_anonymous_file_read_denied(path: &Path) -> io::Result<()> {
     let owned = path.to_path_buf();
     std::thread::spawn(move || {
