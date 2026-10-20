@@ -1087,9 +1087,8 @@ async fn windows_terminated_receiver_requires_new_full_quic_transfer() {
         assert_eq!(
             bounded_wire_get(&second_connection, trusted, 0..manifest.size)
                 .await
-                .as_deref(),
-            Err("GET exceeds Staya's 1 MiB per-range budget"),
-            "the wire harness must refuse an oversized request before I/O"
+                .expect_err("the wire harness must refuse an oversized request before I/O"),
+            "GET exceeds Staya's 1 MiB per-range budget"
         );
         let requested = [(0, cap), (cap, manifest.size)];
         let quota = SharedAdmission::new(Limits {

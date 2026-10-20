@@ -312,3 +312,47 @@ fn pending_symlink_is_never_ignored_or_deleted() {
     drop(lease);
     fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn forged_checksum_cannot_change_locally_trusted_content_identity() {
+    let path = root("forged-root");
+    let owner = StoreLease::acquire(&path).unwrap();
+    publish_candidate(&owner, claim(1)).unwrap();
+    let journal = path.join(name(1));
+    let mut bytes = fs::read(&journal).unwrap();
+    // This is NOT a keyed MAC: an attacker can recompute it. The independent
+    // locally trusted root still must reject such a syntactically valid record.
+    bytes[16] ^= 0x40;
+    let digest = blake3::hash(&bytes[..76]);
+    bytes[76..].copy_from_slice(digest.as_bytes());
+    fs::write(&journal, bytes).unwrap();
+    assert!(read_candidates(&owner, ROOT, SIZE, IROH_PREORDER_16K).is_err());
+    assert!(!path.join(name(2)).exists());
+    drop(owner);
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn replayed_valid_metadata_is_only_untrusted_candidate_not_proof() {
+    let source = root("replay-source");
+    let owner = StoreLease::acquire(&source).unwrap();
+    publish_candidate(&owner, claim(1)).unwrap();
+    let legitimate_record = fs::read(source.join(name(1))).unwrap();
+    drop(owner);
+
+    let foreign = root("replay-foreign");
+    fs::write(foreign.join(name(1)), legitimate_record).unwrap();
+    let separate_owner = StoreLease::acquire(&foreign).unwrap();
+    // Journal parsing alone cannot establish the existence of physical
+    // FsStore data/outboard or grant verified-range/skip capability.
+    assert_eq!(
+        read_candidates(&separate_owner, ROOT, SIZE, IROH_PREORDER_16K).unwrap(),
+        vec![claim(1)]
+    );
+    // Local root and size fencing must still reject cross-object reuse.
+    assert!(read_candidates(&separate_owner, [9; 32], SIZE, IROH_PREORDER_16K).is_err());
+    assert!(read_candidates(&separate_owner, ROOT, SIZE + 1, IROH_PREORDER_16K).is_err());
+    drop(separate_owner);
+    fs::remove_dir_all(foreign).unwrap();
+    fs::remove_dir_all(source).unwrap();
+}
