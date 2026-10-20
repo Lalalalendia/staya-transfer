@@ -864,7 +864,6 @@ async fn linux_killed_receiver_redownloads_uncommitted_or_resumes_verified() {
     .expect("bounded Linux real-process crash QUIC integration");
 }
 
-
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn windows_terminated_receiver_requires_new_full_quic_transfer() {
@@ -915,7 +914,9 @@ async fn windows_terminated_receiver_requires_new_full_quic_transfer() {
         let first = fs::read(dir.join(FIRST_WIRE)).expect("real first GET saved for child");
         verify_network_response(manifest, START..END, &first, &data)
             .expect("received Bao must match trusted immutable root");
-        let actor = FsStore::load(&dir).await.expect("real pinned receiver FsStore");
+        let actor = FsStore::load(&dir)
+            .await
+            .expect("real pinned receiver FsStore");
         let budget = SharedAdmission::new(Limits {
             max_partial_objects: 1,
             max_reserved_bytes: 2 * 1024 * 1024,
@@ -925,11 +926,10 @@ async fn windows_terminated_receiver_requires_new_full_quic_transfer() {
         .unwrap();
         let stop = AtomicBool::new(false);
         let range = ByteRange::new(START, END, manifest.size).unwrap();
-        let (_imported, _permit) = stage_with_inflight_budget(
-            &lease, &budget, &actor, identity, range, &first, &stop,
-        )
-        .await
-        .expect("bounded verified import before TerminateProcess");
+        let (_imported, _permit) =
+            stage_with_inflight_budget(&lease, &budget, &actor, identity, range, &first, &stop)
+                .await
+                .expect("bounded verified import before TerminateProcess");
         lease.validate_fence().unwrap();
         fs::write(dir.join(READY), b"uncommitted").unwrap();
         tokio::time::sleep(Duration::from_secs(100)).await;
