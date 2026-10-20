@@ -68,7 +68,20 @@ async fn real_pinned_fsstore_quiescent_disk_snapshot_has_bounded_refusal() {
         let observed = inspect_quiescent_partial_files(&owner, limits)
             .expect("real pinned partial files must fit local logical budget");
         assert_eq!(observed.objects, 1);
-        assert!(observed.entries >= 4);
+        // A quiescent pinned FsStore is not guaranteed to materialize every
+        // optional metadata sidecar for every partial import. The disk budget
+        // must bound the files ACTUALLY present; it is not a completeness or
+        // durability certificate. The physical Bao audit below separately
+        // requires the real .data and .obao4 backings.
+        assert!(observed.entries >= 2, "real data and Bao outboard must exist");
+        let denied_entries = DiskLimits {
+            max_entries: observed.entries - 1,
+            ..limits
+        };
+        assert!(
+            inspect_quiescent_partial_files(&owner, denied_entries).is_err(),
+            "one fewer entry than the actual pinned FsStore must fail closed"
+        );
         assert!(observed.logical_bytes > 0);
         let denied = DiskLimits {
             max_logical_bytes: observed.logical_bytes - 1,

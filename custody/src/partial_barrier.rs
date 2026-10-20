@@ -158,3 +158,78 @@ pub fn publish_after_quiescent_audit(
         crate::checkpoint::publish_candidate(owner, claim)
     }
 }
+
+/// Re-audit an existing *untrusted candidate* after the owning FsStore actor
+/// is QUIESCENT. The caller must independently authenticate persisted Bao and
+/// byte ranges against a locally pinned BLAKE3 root and exact object length.
+///
+/// This is a private, cooperative Unix LAB helper, not a VerifiedCheckpoint,
+/// retained-byte skip token, trusted ACK, or File Gate authorization.
+/// On Windows retained-range durability remains unproven: refuse by design.
+/// Hostile concurrent path swaps are not solved by cooperative ownership.
+pub fn reaudit_untrusted_candidate_backings(
+    owner: &StoreLease,
+    claim: CheckpointClaim,
+    audit: impl FnOnce(&PartialPaths) -> io::Result<()>,
+) -> io::Result<()> {
+    claim.validate()?;
+    owner.validate_fence()?;
+    #[cfg(not(unix))]
+    {
+        let _ = audit;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Windows durable retained-range reuse has not been proven",
+        ))
+    }
+    #[cfg(unix)]
+    {
+        let candidates = crate::checkpoint::read_candidates(
+            owner,
+            claim.content_root,
+            claim.object_len,
+            claim.bao_profile,
+        )?;
+        if !candidates.contains(&claim) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "matching checkpoint candidate not found",
+            ));
+        }
+        let backings = paths(owner, claim);
+        let names = [
+            &backings.data,
+            &backings.outboard,
+            &backings.sizes,
+            &backings.bitfield,
+        ];
+        let held = names
+            .into_iter()
+            .map(|path| checked_open(path))
+            .collect::<io::Result<Vec<_>>>()?;
+        if held[0].length < claim.end
+            || held[1].length == 0
+            || held[2].length < 8
+            || held[3].length == 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing or truncated FsStore physical sidecar",
+            ));
+        }
+        // The callback is required to verify ACTUAL data + sparse Bao
+        // outboard against the caller's independently trusted full root.
+        audit(&backings)?;
+        owner.validate_fence()?;
+        for file in &held {
+            validate_walk(&file.path)?;
+            if file.identity != Handle::from_path(&file.path)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "physical FsStore backing identity changed during audit",
+                ));
+            }
+        }
+        Ok(())
+    }
+}

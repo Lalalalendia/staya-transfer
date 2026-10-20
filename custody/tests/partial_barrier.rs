@@ -168,3 +168,28 @@ fn windows_rejects_unproven_directory_durability_before_creating_record() {
     drop(owner);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_existing_candidate_remains_untrusted_without_directory_durability() {
+    let root = private_root();
+    let paths = fixture_paths(&root);
+    seed(&paths);
+    let owner = StoreLease::acquire(&root).unwrap();
+    staya_custody_lab::checkpoint::publish_candidate(&owner, claim()).unwrap();
+    assert_eq!(
+        read_candidates(&owner, ROOT, SIZE, IROH_PREORDER_16K)
+            .unwrap()
+            .len(),
+        1
+    );
+    let error = staya_custody_lab::partial_barrier::reaudit_untrusted_candidate_backings(
+        &owner,
+        claim(),
+        |_| Ok(()),
+    )
+    .expect_err("Windows file sync is not a proven durable directory barrier");
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    drop(owner);
+    fs::remove_dir_all(root).unwrap();
+}
