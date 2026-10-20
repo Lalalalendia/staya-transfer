@@ -1,6 +1,6 @@
 //! G2-05h3e private process fixture: grandparent -> launcher -> worker.
 //! No persistent store, user documents, network grants or Akula are touched.
-use staya_native_parent_lab::linux::{PidFd, bind_actual_parent, require_parent_death_before_exec};
+use staya_native_parent_lab::linux::{bind_actual_parent, require_parent_death_before_exec};
 use std::{
     env,
     fs::{self, OpenOptions},

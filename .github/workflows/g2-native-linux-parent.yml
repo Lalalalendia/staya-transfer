@@ -12,7 +12,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: sty-g2-05h3e-\${{ github.event.pull_request.head.ref || github.ref }}
+  group: sty-g2-05h3e-${{ github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 jobs:
   linux-native-parent:
