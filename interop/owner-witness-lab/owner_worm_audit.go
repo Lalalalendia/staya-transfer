@@ -345,16 +345,63 @@ func (p ReadOnlyObjectLockPreflight) Read(ctx context.Context) ([]LockedWORMVers
 	return out, nil
 }
 
-// RunReadOnlyWORMPreflight has no credentials and no file writes outside an
-// automatically removed 0600 local temp body. Operators run it from an
-// opt-in test on their machine, not on GitHub-hosted runners.
-func RunReadOnlyWORMPreflight(ctx context.Context, source ReadOnlyObjectLockPreflight, owner ed25519.PublicKey, expected DenialCheckpoint, now time.Time) error {
-	if !validCASCheckpoint(expected) || len(owner) != ed25519.PublicKeySize {
+// ObserveYDBAgainstWORMWithPin requires a separately protected high-water
+// checkpoint. This pin MUST be obtained from independent custody and advanced
+// after every accepted revoke. Copying it from today's YDB/S3 listing defeats
+// its purpose. A Go argument alone does not establish nonrollbackable storage.
+// The pinned exact commitment must occur in the signed retained chain, not
+// merely a checkpoint with a numerically greater epoch.
+func ObserveYDBAgainstWORMWithPin(versions []LockedWORMVersion, owner ed25519.PublicKey, ydb, pinnedMinimum DenialCheckpoint, now time.Time, minimumRemaining time.Duration) error {
+	if !validCASCheckpoint(pinnedMinimum) || !validCASCheckpoint(ydb) ||
+		pinnedMinimum.Installation != ydb.Installation || pinnedMinimum.Vault != ydb.Vault ||
+		pinnedMinimum.Epoch > ydb.Epoch ||
+		ObserveYDBAgainstWORM(versions, owner, ydb, now, minimumRemaining) != nil {
+		return ErrAnchorHold
+	}
+	found := false
+	for _, version := range versions {
+		row, err := inspectWORMVersion(version, owner, ydb.Installation, ydb.Vault, now, minimumRemaining)
+		if err != nil {
+			return ErrAnchorHold
+		}
+		if row.checkpoint.Epoch == pinnedMinimum.Epoch {
+			if row.checkpoint != pinnedMinimum || found {
+				return ErrAnchorHold
+			}
+			found = true
+		}
+	}
+	if !found {
+		return ErrAnchorHold
+	}
+	return nil
+}
+
+// RunReadOnlyWORMPreflight reads real YDB on BOTH sides of the bounded,
+// double-listed S3 history inspection, requiring exact operator-expected state
+// and an independently pinned minimum. The two sources are not a transaction:
+// this is fail-closed DIAGNOSTICS ONLY and cannot grant any permission.
+// It takes only DenialAnchorReader, never a writer or CAS authority.
+func RunReadOnlyWORMPreflight(ctx context.Context, source ReadOnlyObjectLockPreflight, owner ed25519.PublicKey,
+	ydb DenialAnchorReader, expected, pinnedMinimum DenialCheckpoint, now time.Time) error {
+	if ctx == nil || ctx.Err() != nil || ydb == nil || !validCASCheckpoint(expected) ||
+		!validCASCheckpoint(pinnedMinimum) || len(owner) != ed25519.PublicKeySize ||
+		expected.Installation != pinnedMinimum.Installation || expected.Vault != pinnedMinimum.Vault ||
+		pinnedMinimum.Epoch > expected.Epoch {
+		return ErrAnchorHold
+	}
+	before, err := ydb.Read(ctx, expected.Installation, expected.Vault)
+	if err != nil || ctx.Err() != nil || before != expected {
 		return ErrAnchorHold
 	}
 	values, err := source.Read(ctx)
-	if err != nil {
+	if err != nil || ctx.Err() != nil ||
+		ObserveYDBAgainstWORMWithPin(values, owner, expected, pinnedMinimum, now, 7*24*time.Hour) != nil {
 		return ErrAnchorHold
 	}
-	return ObserveYDBAgainstWORM(values, owner, expected, now, 7*24*time.Hour)
+	after, err := ydb.Read(ctx, expected.Installation, expected.Vault)
+	if err != nil || ctx.Err() != nil || after != before {
+		return ErrAnchorHold
+	}
+	return nil
 }
