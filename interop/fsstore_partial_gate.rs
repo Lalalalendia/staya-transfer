@@ -993,7 +993,6 @@ async fn real_fsstore_os_process_supervisor_clean_and_kill() {
     }
 }
 
-
 /// G2-05h3b: The launcher never owns an FsStore lease. A separately launched
 /// child owns the real pinned actor and lease, and its only parent-control
 /// writer is an anonymous stdin pipe held by the launcher process.
@@ -1017,6 +1016,7 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
     const CHILD_READY: &str = ".g2-05h3b-child-ready";
     const PARENT_READY: &str = ".g2-05h3b-parent-ready";
     const CHILD_EOF: &str = ".g2-05h3b-orphan-saw-eof";
+    const CHILD_ARMED: &str = ".g2-05h3b-owner-armed";
     const TEST_NAME: &str = "real_fsstore_parent_death_fails_closed_without_clean_ack";
 
     if let Some(root) = std::env::var_os(CHILD_ENV) {
@@ -1053,14 +1053,27 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
         // The only pipe writer belongs to the launcher. The launcher is
         // HARD-KILLED, not told to close stdin cleanly. A broken channel is
         // NOT a clean shutdown command, so no quiescence witness is issued.
-        let received = tokio::task::spawn_blocking(|| {
+        // Exchange a real command byte first: startup markers alone cannot
+        // prove that the child's stdin is connected or still open on Windows.
+        // Only after the ARM response may the grandparent test custody.
+        let armed_path = root.join(CHILD_ARMED);
+        let received = tokio::task::spawn_blocking(move || {
+            let mut input = io::stdin().lock();
+            let mut arm = [0u8; 1];
+            input.read_exact(&mut arm).expect("private parent must send ARM");
+            assert_eq!(arm, [b'A'], "unrecognized parent control command");
+            fs::write(&armed_path, b"ARMED").unwrap();
+            fs::File::open(&armed_path).unwrap().sync_all().unwrap();
             let mut control = [0u8; 1];
-            io::stdin().read(&mut control)
+            input.read(&mut control)
         })
         .await
         .expect("blocking stdin reader must join")
         .expect("private pipe read must complete");
-        assert_eq!(received, 0, "parent death must produce EOF, not an IPC command");
+        assert_eq!(
+            received, 0,
+            "parent death must produce EOF, not an IPC command"
+        );
         fs::write(root.join(CHILD_EOF), b"EOF_NO_CLEAN_ACK").unwrap();
         fs::File::open(root.join(CHILD_EOF))
             .unwrap()
@@ -1085,7 +1098,10 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
             .stderr(Stdio::null())
             .spawn()
             .expect("launch independent writer child");
-        assert!(child.stdin.is_some(), "launcher must own private pipe writer");
+        assert!(
+            child.stdin.is_some(),
+            "launcher must own private pipe writer"
+        );
         let started = Instant::now();
         while !root.join(CHILD_READY).is_file() {
             assert!(
@@ -1098,6 +1114,31 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
             );
             thread::sleep(Duration::from_millis(30));
         }
+        // Do not report parent-ready until the writer has read an actual
+        // pipe byte from this launcher while keeping the OS lease alive.
+        child
+            .stdin
+            .as_mut()
+            .expect("launcher owns private writer endpoint")
+            .write_all(b"A")
+            .expect("send ARM to live FsStore owner");
+        child.stdin.as_mut().unwrap().flush().unwrap();
+        let started = Instant::now();
+        while !root.join(CHILD_ARMED).is_file() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "writer exited before acknowledging ARM"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "writer did not acknowledge actual private pipe byte"
+            );
+            thread::sleep(Duration::from_millis(30));
+        }
+        assert!(
+            !root.join(CHILD_EOF).exists(),
+            "writer saw EOF before the launcher was hard-killed"
+        );
         fs::write(root.join(PARENT_READY), child.id().to_string()).unwrap();
         fs::File::open(root.join(PARENT_READY))
             .unwrap()
@@ -1134,10 +1175,7 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "staya-g2-05h3b-{}-{unique}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("staya-g2-05h3b-{}-{unique}", std::process::id()));
     assert!(!root.exists(), "never reuse a private store directory");
     fs::create_dir(&root).expect("create disposable receiver directory");
     let mut launcher = KillLauncherOnDrop(
@@ -1170,16 +1208,20 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
         .parse()
         .expect("grandparent must observe real child PID");
     assert!(child_pid > 0);
-    assert!(
-        matches!(
-            StoreLease::acquire(&root),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock
-        ),
-        "real pinned FsStore child must exclude a second writer before parent death"
-    );
+    assert!(root.join(CHILD_ARMED).exists(), "real pipe ARM must be observed");
     assert!(
         !root.join(CHILD_EOF).exists(),
         "pipe must not report EOF while parent remains alive"
+    );
+    let competing_owner = StoreLease::acquire(&root);
+    assert!(
+        matches!(
+            &competing_owner,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock
+        ),
+        "real pinned FsStore child must exclude a second writer before parent death:          child_pid={child_pid} competing_owner={competing_owner:?}          armed={} eof={}",
+        root.join(CHILD_ARMED).exists(),
+        root.join(CHILD_EOF).exists(),
     );
 
     // Linux SIGKILL / Windows TerminateProcess: no Rust Drop, no explicit
@@ -1218,7 +1260,9 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
             Err(e) => panic!("unexpected independent reacquisition error: {e}"),
         }
     };
-    owner.validate_fence().expect("cold owner must validate physical root");
+    owner
+        .validate_fence()
+        .expect("cold owner must validate physical root");
     let payload = make_data();
     let (identity, _) = prepare(&payload);
     assert!(
