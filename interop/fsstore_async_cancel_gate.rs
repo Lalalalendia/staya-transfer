@@ -4,8 +4,12 @@
 //! the parent requires kernel custody to survive until the process is killed.
 //! There is no durable receipt, verified resume, or Akula File Gate.
 
+// Reuse the real production-shaped fixture modules, while this focused
+// cancellation executable intentionally exercises only their lifecycle path.
+#[allow(dead_code)]
 #[path = "fsstore_partial_adapter.rs"]
 mod partial_adapter;
+#[allow(dead_code)]
 #[path = "fsstore_shutdown_supervisor.rs"]
 mod shutdown_supervisor;
 
