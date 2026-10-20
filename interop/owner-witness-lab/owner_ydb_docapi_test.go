@@ -143,7 +143,9 @@ func newYDBFixture(t *testing.T, head Head) (*YDBDocumentDenialAnchor, *document
 	// Inject only into the internal test instance. The public constructor can
 	// never connect to a non-YDB host or disable production TLS validation.
 	provider.endpoint = srv.URL
+	originalRedirectPolicy := provider.client.CheckRedirect
 	provider.client = srv.Client()
+	provider.client.CheckRedirect = originalRedirectPolicy
 	provider.client.Timeout = 5 * time.Second
 	provider.client.Transport.(*http.Transport).TLSClientConfig.MinVersion = tls.VersionTLS12
 	return provider, serverState
@@ -296,6 +298,47 @@ func TestYDBStillCannotDefeatPrivilegedRemoteRollback(t *testing.T) {
 	equal, err := ReadAnchoredDenialHead(context.Background(), path, testLedgerInstallation, testLedgerVault, p)
 	if err != nil || equal != initial {
 		t.Fatalf("rollback counterexample invalid: %v %+v", err, equal)
+	}
+}
+
+// Two genuinely simultaneous HTTP clients present the same old checkpoint.
+// The emulator serializes updates exactly as YDB's documented conditional
+// UpdateItem. A real YDB instance is a separate, mandatory integration test.
+func TestYDBConditionalUpdateHasExactlyOneWinner(t *testing.T) {
+	first := fixtureHead(t)
+	before, err := checkpointFor(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	floors, err := CanonicalDenyDigest([]Floor{{Replica: testLedgerReplica, Epoch: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := checkpointFor(Head{Installation: before.Installation, Vault: before.Vault,
+		Epoch: before.Epoch + 1, DenyDigest: floors})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, f := newYDBFixture(t, first)
+	barrier := make(chan struct{})
+	outcome := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() { <-barrier; outcome <- p.CompareAndSeal(context.Background(), before, after) }()
+	}
+	close(barrier)
+	a, b := <-outcome, <-outcome
+	if !((a == nil && errors.Is(b, ErrAnchorHold)) || (b == nil && errors.Is(a, ErrAnchorHold))) {
+		t.Fatalf("exactly one update must win: a=%v b=%v", a, b)
+	}
+	state, err := p.Read(context.Background(), before.Installation, before.Vault)
+	if err != nil || state != after {
+		t.Fatalf("remote CAS left inconsistent state: %v %+v", err, state)
+	}
+	f.mu.Lock()
+	updates := f.totalUpdate
+	f.mu.Unlock()
+	if updates != 2 {
+		t.Fatalf("CAS must use two independent HTTP calls, got %d", updates)
 	}
 }
 
