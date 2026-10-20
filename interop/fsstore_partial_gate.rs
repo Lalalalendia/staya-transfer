@@ -1146,3 +1146,196 @@ async fn real_fsstore_missing_sidecars_and_corruption_refuse_candidate_reaudit()
     .await
     .expect("bounded G2-06f real sidecar corruption gate");
 }
+
+/// G2-06g2: actual pinned FsStore OS-process SIGKILL at four distinct
+/// actor/storage phases. No installed Akula or user file is touched.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn real_fsstore_phase_sigkill_requires_independent_root_proof() {
+    use staya_custody_lab::{
+        checkpoint::MetadataBarrier, partial_barrier::reaudit_untrusted_candidate_backings,
+    };
+    use std::{
+        os::unix::process::ExitStatusExt,
+        process::{Child, Command, Stdio},
+        thread,
+        time::{Instant, SystemTime, UNIX_EPOCH},
+    };
+
+    const STAGE: &str = "STY_G2_06G2_STAGE";
+    const ROOT_DIR: &str = "STY_G2_06G2_ROOT";
+    const MARKER: &str = "STY_G2_06G2_MARKER";
+    let bytes = make_data();
+    let (identity, wire) = prepare(&bytes);
+    let claim = CheckpointClaim {
+        sequence: 1,
+        content_root: identity.manifest.id.0,
+        object_len: identity.manifest.size,
+        bao_profile: IROH_PREORDER_16K,
+        start: START,
+        end: END,
+    };
+
+    if let Ok(stage) = std::env::var(STAGE) {
+        let root = std::path::PathBuf::from(std::env::var_os(ROOT_DIR).unwrap());
+        let marker = std::path::PathBuf::from(std::env::var_os(MARKER).unwrap());
+        let lease = StoreLease::acquire(&root).unwrap();
+        let actor = FsStore::load(&root).await.unwrap();
+        let request = staya_transfer::TransferRequest::new(identity.manifest, range()).unwrap();
+        let verified = staya_transfer::bao::verify_bao_range(&request, &wire[8..]).unwrap();
+        assert_eq!(verified.bytes().len(), (END - START) as usize);
+        if stage != "verified-pre-import" {
+            stage_verified_fixture(&actor, identity, range(), &wire)
+                .await
+                .unwrap();
+        }
+        if matches!(stage.as_str(), "quiesced-no-record" | "published-record") {
+            actor.shutdown().await.unwrap();
+            drop(actor);
+        }
+        if stage == "published-record" {
+            let barrier = publish_after_quiescent_audit(&lease, claim, |_| {
+                let stored = audit_clean_closed_fixture(&root, identity, range())
+                    .map_err(io::Error::other)?;
+                if stored != bytes[START as usize..END as usize] {
+                    return Err(io::Error::other("physical Bao differed from local root"));
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(barrier, MetadataBarrier::FileAndDirectorySynced);
+        }
+        assert!(
+            matches!(
+                stage.as_str(),
+                "verified-pre-import"
+                    | "import-accepted"
+                    | "quiesced-no-record"
+                    | "published-record"
+            ),
+            "unknown FsStore crash phase"
+        );
+        lease.validate_fence().unwrap();
+        fs::write(marker, stage.as_bytes()).unwrap();
+        thread::sleep(Duration::from_secs(90));
+        panic!("independent parent must SIGKILL the real writer at {stage}");
+    }
+
+    struct Reap(Option<Child>);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let cases = [
+        ("verified-pre-import", 0usize, false),
+        ("import-accepted", 0usize, false),
+        ("quiesced-no-record", 0usize, true),
+        ("published-record", 1usize, true),
+    ];
+    let mut inventory = String::new();
+    for (stage, expected_candidates, closed_physical) in cases {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "staya-g2-06g2-{}-{stage}-{nonce}",
+            std::process::id()
+        ));
+        let root = base.join("partial");
+        let marker = base.join("cut-reached");
+        fs::create_dir_all(&root).unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("real_fsstore_phase_sigkill_requires_independent_root_proof")
+            .arg("--nocapture")
+            .env(STAGE, stage)
+            .env(ROOT_DIR, &root)
+            .env(MARKER, &marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut guard = Reap(Some(child));
+        let start = Instant::now();
+        while !marker.exists() {
+            if guard.0.as_mut().unwrap().try_wait().unwrap().is_some() {
+                let output = guard.0.take().unwrap().wait_with_output().unwrap();
+                panic!(
+                    "child exited before {stage}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(50),
+                "no marker at {stage}"
+            );
+            thread::sleep(Duration::from_millis(30));
+        }
+        assert_eq!(fs::read(&marker).unwrap(), stage.as_bytes());
+        let busy = StoreLease::acquire(&root).expect_err("child must exclude another writer");
+        assert_eq!(busy.kind(), io::ErrorKind::WouldBlock);
+        guard
+            .0
+            .as_mut()
+            .unwrap()
+            .kill()
+            .expect("real Linux SIGKILL");
+        let killed = guard.0.take().unwrap().wait_with_output().unwrap();
+        assert_eq!(
+            killed.status.signal(),
+            Some(9),
+            "process did not receive SIGKILL at {stage}: {}",
+            String::from_utf8_lossy(&killed.stderr)
+        );
+        let owner = StoreLease::acquire(&root).expect("new OS owner after real process death");
+        let candidates = read_candidates(
+            &owner,
+            identity.manifest.id.0,
+            identity.manifest.size,
+            IROH_PREORDER_16K,
+        )
+        .unwrap();
+        assert_eq!(candidates.len(), expected_candidates);
+        if closed_physical {
+            let stored = audit_clean_closed_fixture(&root, identity, range()).unwrap();
+            assert_eq!(stored, bytes[START as usize..END as usize]);
+        }
+        if expected_candidates == 0 {
+            assert!(
+                reaudit_untrusted_candidate_backings(&owner, claim, |_| Ok(())).is_err(),
+                "valid physical bytes alone cannot authorize missing-range skip"
+            );
+        } else {
+            assert_eq!(candidates, vec![claim]);
+            reaudit_untrusted_candidate_backings(&owner, claim, |_| {
+                let stored = audit_clean_closed_fixture(&root, identity, range())
+                    .map_err(io::Error::other)?;
+                if stored != bytes[START as usize..END as usize] {
+                    return Err(io::Error::other("reopened physical Bao is untrusted"));
+                }
+                Ok(())
+            })
+            .expect("only published Linux candidate can pass physical re-audit");
+        }
+        inventory.push_str(&format!(
+            "stage={stage} signal=9 candidates={expected_candidates} verified_clean_data={closed_physical} unauthorized_skip=false\n"
+        ));
+        drop(owner);
+        drop(guard);
+        fs::remove_dir_all(base).unwrap();
+    }
+    if let Some(dir) = std::env::var_os("STY_G2_06G2_OUTPUT_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("inventory.txt"), inventory).unwrap();
+    }
+    println!(
+        "STY_G2_06G2 real_fsstore=true root_verified=true sigkill=true release_gated=true power_loss=false file_gate=false"
+    );
+}
