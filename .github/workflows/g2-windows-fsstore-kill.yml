@@ -65,6 +65,8 @@ jobs:
           name: windows-direct-preview-${{ matrix.variant }}
           path: g1f-private-preview/
           if-no-files-found: error
+      - name: STY-G2-05h3g native Windows JobObject kill with real pinned FsStore
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_store_worker_gate -- --exact real_fsstore_native_containment_survives_parent_kill --nocapture
       - name: Strict Windows integration lint
         run: cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --all-targets -- -D warnings
       - name: Windows integration format
