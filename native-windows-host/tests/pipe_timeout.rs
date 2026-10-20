@@ -8,8 +8,7 @@ use staya_windows_job_lab::{
 use std::{
     env,
     ffi::OsString,
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
