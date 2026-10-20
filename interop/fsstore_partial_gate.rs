@@ -1819,7 +1819,9 @@ async fn real_fsstore_registered_child_join_precedes_actor_quiescence() {
 
         let new_owner = StoreLease::acquire(&root)
             .expect("cleanly terminated actor and children permit new OS custody");
-        let reopened = FsStore::load(&root).await.expect("cold reopen real FsStore");
+        let reopened = FsStore::load(&root)
+            .await
+            .expect("cold reopen real FsStore");
         let after = audit_clean_closed_fixture(&root, identity, range())
             .expect("reopened actor must preserve root-authenticated sparse Bao");
         assert_eq!(after, physical);
@@ -1837,4 +1839,3 @@ async fn real_fsstore_registered_child_join_precedes_actor_quiescence() {
     .await
     .expect("bounded registered-child/actor joint shutdown test");
 }
-

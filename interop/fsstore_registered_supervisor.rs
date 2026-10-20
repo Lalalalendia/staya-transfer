@@ -18,12 +18,7 @@ use staya_custody_lab::{
     child_registry::{ReapedChildren, WriterId, WriterProcessRegistry},
 };
 use staya_transfer::{ByteRange, recovery::StoreIdentity};
-use std::{
-    path::Path,
-    process::Command,
-    sync::atomic::AtomicBool,
-    time::Duration,
-};
+use std::{path::Path, process::Command, sync::atomic::AtomicBool, time::Duration};
 
 /// An affine experimental owner; no raw registry/actor is returned to callers.
 pub struct RegisteredActiveFsStore {
@@ -79,7 +74,10 @@ impl RegisteredActiveFsStore {
     pub fn begin_closing(self) -> Result<RegisteredClosingFsStore, (Self, String)> {
         let Self { active, writers } = self;
         if let Err(e) = writers.begin_closing() {
-            return Err((Self { active, writers }, format!("child registry HOLD: {e}")));
+            return Err((
+                Self { active, writers },
+                format!("child registry HOLD: {e}"),
+            ));
         }
         match active.begin_closing() {
             Ok(closing) => Ok(RegisteredClosingFsStore {
@@ -111,7 +109,10 @@ impl RegisteredClosingFsStore {
     /// call must precede the actor-shutdown witness, even if count is zero.
     pub async fn finish(self) -> Result<RegisteredQuiescentFsStore, (Self, String)> {
         if !self.joined {
-            return Err((self, "registered child close/join not proven: HOLD".to_owned()));
+            return Err((
+                self,
+                "registered child close/join not proven: HOLD".to_owned(),
+            ));
         }
         match self.writers.active_children() {
             Ok(0) => {}
