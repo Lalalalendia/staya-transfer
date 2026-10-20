@@ -106,12 +106,25 @@ async fn real_fsstore_many_disjoint_bao_ranges_bound_resources_after_cold_reopen
             .is_empty(),
             "64 actor-accepted ranges cannot themselves mint one checkpoint"
         );
+        // This ledger is produced exclusively AFTER physical Bao verification
+        // by the cold independent process, not by the original in-memory sender.
+        let mut physical_inventory = format!(
+            "root={}\nobject_size={}\n",
+            outboard.root.to_hex(),
+            identity.manifest.size
+        );
         for index in 0..COUNT {
             let range = interval(index);
-            let expected = &trusted[range.start() as usize..range.end() as usize];
+            let start = range.start();
+            let end = range.end();
+            let expected = &trusted[start as usize..end as usize];
             let verified = partial_adapter::audit_clean_closed_fixture(&root, identity, range)
                 .expect("cold independent sparse physical Bao proof");
             assert_eq!(verified, expected, "wrong cold Bao group {index}");
+            physical_inventory.push_str(&format!(
+                "group={index} start={start} end={end} blake3={}\n",
+                blake3::hash(&verified).to_hex()
+            ));
         }
 
         // Even many physically authentic groups have ZERO durable skip
@@ -130,6 +143,11 @@ async fn real_fsstore_many_disjoint_bao_ranges_bound_resources_after_cold_reopen
         .map(|range| range.len())
         .sum();
         assert_eq!(total_missing, SIZE as u64);
+        if let Some(dir) = std::env::var_os("STY_G2_06I_OUTPUT_DIR") {
+            let dir = PathBuf::from(dir);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("physical-ranges.txt"), physical_inventory).unwrap();
+        }
         drop(owner);
         println!("STY_G2_06I_COLD actor_reopen=true audited_groups=64 candidates=0 skip=false");
         return;
@@ -268,6 +286,10 @@ async fn real_fsstore_many_disjoint_bao_ranges_bound_resources_after_cold_reopen
     if let Some(dir) = std::env::var_os("STY_G2_06I_OUTPUT_DIR") {
         let dir = PathBuf::from(dir);
         fs::create_dir_all(&dir).unwrap();
+        assert!(
+            dir.join("physical-ranges.txt").is_file(),
+            "separate OS process did not save its 64 root-authenticated physical ranges"
+        );
         fs::write(
             dir.join("inventory.txt"),
             "real_fsstore_groups=64\nphysical_bao_readback=64\ncheckpoint_candidates=0\nredownload=full\nobject_count=1\nlogical_disk_bounded=true\ninflight_permit_leaks=0\nfile_descriptor_growth_bounded=true\nsparse_planner_size_gt_1TiB=true\nfile_gate=false\n",

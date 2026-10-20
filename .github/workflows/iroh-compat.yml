@@ -157,5 +157,6 @@ jobs:
           cmp wire-output/wire-release/fsstore-cuts/inventory.txt wire-output/wire-fork/fsstore-cuts/inventory.txt
           echo STY_G2_06G2_RELEASE_FORK_ACTOR_CUTS_IDENTICAL=true
           cmp wire-output/wire-release/many-ranges/inventory.txt wire-output/wire-fork/many-ranges/inventory.txt
-          echo STY_G2_06I_RELEASE_FORK_64_RANGES_IDENTICAL=true
+          cmp wire-output/wire-release/many-ranges/physical-ranges.txt wire-output/wire-fork/many-ranges/physical-ranges.txt
+          echo STY_G2_06I_RELEASE_FORK_64_PHYSICAL_BAO_RANGES_IDENTICAL=true
           echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true
