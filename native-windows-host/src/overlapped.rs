@@ -221,7 +221,15 @@ pub fn write_all(handle: RawHandle, mut bytes: &[u8], deadline: Instant) -> io::
         let n = operation(handle, deadline, false, |overlapped| {
             // SAFETY: immutable borrowed buffer stays live and unmoved until
             // the kernel returns a completed result or the process aborts.
-            unsafe { WriteFile(handle, bytes.as_ptr().cast(), length, std::ptr::null_mut(), overlapped) }
+            unsafe {
+                WriteFile(
+                    handle,
+                    bytes.as_ptr().cast(),
+                    length,
+                    std::ptr::null_mut(),
+                    overlapped,
+                )
+            }
         })? as usize;
         if n == 0 || n > bytes.len() {
             return Err(io::Error::new(
