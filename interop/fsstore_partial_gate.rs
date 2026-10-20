@@ -1471,9 +1471,8 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
                 if let Some(mut stream) = child.stderr.take() {
                     let _ = stream.read_to_string(&mut stderr);
                 }
-                let detail = format!(
-                    "child exited before Bao READY: status={status} stderr={stderr}"
-                );
+                let detail =
+                    format!("child exited before Bao READY: status={status} stderr={stderr}");
                 fs::write(root.join(LAUNCHER_ERROR), &detail).unwrap();
                 panic!("{detail}");
             }
@@ -1515,11 +1514,8 @@ async fn real_fsstore_parent_death_fails_closed_without_clean_ack() {
             !root.join(CHILD_EOF).exists(),
             "writer saw EOF before the launcher was hard-killed"
         );
-        publish_test_marker(
-            &root.join(PARENT_READY),
-            child.id().to_string().as_bytes(),
-        )
-        .expect("sync launcher-ready marker before publishing");
+        publish_test_marker(&root.join(PARENT_READY), child.id().to_string().as_bytes())
+            .expect("sync launcher-ready marker before publishing");
 
         // Remain alive and keep the writer-side stdin handle open. The
         // grandparent must kill this OS process rather than sending CLOSE.
