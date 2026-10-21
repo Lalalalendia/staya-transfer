@@ -22,6 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Fast Rustfmt before Docker network build
+        run: cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
       - name: Confirm real Docker network namespace capability
         run: |
           set -euo pipefail
