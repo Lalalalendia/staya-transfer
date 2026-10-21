@@ -156,6 +156,10 @@ jobs:
         env:
           STY_G1K_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/ordered-queue
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact three_explicit_files_real_quic_serial_queue_with_physical_readback --nocapture
+      - name: STY-G1k-c one direct QUIC connection serves three locally approved object roots
+        env:
+          STY_G1K_SINGLE_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/single-session
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_provider_one_receiver_one_quic_connection_serves_exact_selected_set --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
@@ -230,5 +234,9 @@ jobs:
             cmp "wire-output/wire-release/ordered-queue/$f" "wire-output/wire-fork/ordered-queue/$f"
           done
           echo STY_G1K_RELEASE_FORK_THREE_ACTUAL_QUIC_OBJECTS_IDENTICAL=true
+          for f in verified-000.bin verified-001.bin verified-002.bin inventory.txt; do
+            cmp "wire-output/wire-release/single-session/$f" "wire-output/wire-fork/single-session/$f"
+          done
+          echo STY_G1K_SINGLE_SESSION_EXACT_ROOTS_RELEASE_FORK_IDENTICAL=true
           echo STY_G1F_RELEASE_FORK_TWO_PROCESS_DIRECT_PREVIEW_IDENTICAL=true
           echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true
