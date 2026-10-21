@@ -552,7 +552,7 @@ async fn serve_batch(allowed_text: &str, sources: &[PathBuf]) -> Result<(), Stri
     Ok(())
 }
 
-async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
+async fn receive(lab_drop_after_first_range: bool, large: bool) -> Result<(), String> {
     // The receiver key never leaves this process and is never persisted.
     let private_key = SecretKey::generate();
     println!("PEER_ID {}", private_key.public());
@@ -581,7 +581,11 @@ async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
     let size = fields[3]
         .parse::<u64>()
         .map_err(|e| format!("object size: {e}"))?;
-    if size == 0 || size > MAX_OBJECT {
+    if large {
+        if size <= MAX_OBJECT || size > MAX_LARGE_OBJECT {
+            return Err("large preview requires object >8 MiB and <=16 MiB".into());
+        }
+    } else if size == 0 || size > MAX_OBJECT {
         return Err("object must be nonempty and at most 8 MiB".into());
     }
     if lab_drop_after_first_range && size <= RANGE {
@@ -665,45 +669,82 @@ async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
         .await
         .map_err(|e| format!("quiesce real FsStore: {e}"))?;
     drop(actor);
-    // Filesystem readback is independently Bao-authenticated for every group;
-    // receiving GET bytes or an FsStore bitmap is not a durable receipt.
-    let audited = if size < 16 * 1024 {
-        partial_adapter::audit_cold_small_complete_object(&root, identity).await?
+    // Cold physical source readback: every output range is first independently
+    // Bao-audited from the cleanly closed FsStore, never trusted from its bitfield.
+    // Large objects are written in 64KiB chunks, never one entire-size Vec.
+    let staged = root.join(if large {
+        "large-verified-staged.bin"
     } else {
-        let mut audited = Vec::with_capacity(size as usize);
-        let mut offset = 0u64;
-        while offset < size {
-            let end = offset.saturating_add(RANGE).min(size);
-            let range = ByteRange::new(offset, end, size).map_err(|e| format!("{e:?}"))?;
-            audited.extend(partial_adapter::audit_clean_closed_fixture(
-                &root, identity, range,
-            )?);
-            offset = end;
-        }
-        audited
-    };
-    if audited.len() as u64 != size || *blake3::hash(&audited).as_bytes() != manifest.id.0 {
-        return Err("cold physical readback did not match the trusted root".into());
-    }
-    owner
-        .validate_fence()
-        .map_err(|e| format!("final local custody: {e}"))?;
-
-    // Output is an untrusted private staging *copy*, not an Akula user file
-    // and not a File Gate publication. Never accept a peer-supplied filename.
-    let staged = root.join("verified-staged.bin");
+        "verified-staged.bin"
+    });
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&staged)
         .map_err(|e| format!("new private stage: {e}"))?;
-    output
-        .write_all(&audited)
-        .map_err(|e| format!("write private stage: {e}"))?;
-    output
-        .sync_all()
+    if large {
+        owner.validate_fence()
+            .map_err(|e| format!("large stage OS custody: {e}"))?;
+        let mut offset = 0u64;
+        let mut hasher = blake3::Hasher::new();
+        while offset < size {
+            let end = offset.saturating_add(RANGE).min(size);
+            let range = ByteRange::new(offset, end, size)
+                .map_err(|e| format!("large physical audit range: {e:?}"))?;
+            let authenticated = partial_adapter::audit_clean_closed_fixture(
+                &root, identity, range,
+            )?;
+            if authenticated.len() as u64 != end - offset || authenticated.len() > RANGE as usize {
+                return Err("large Bao cold audit returned incorrect bounded span".into());
+            }
+            output.write_all(&authenticated)
+                .map_err(|e| format!("write Bao-audited large private stage: {e}"))?;
+            hasher.update(&authenticated);
+            offset = end;
+        }
+        if offset != size || hasher.finalize().as_bytes() != &manifest.id.0 {
+            return Err("large physical Bao audit failed complete pinned BLAKE3 root".into());
+        }
+    } else {
+        let audited = if size < 16 * 1024 {
+            partial_adapter::audit_cold_small_complete_object(&root, identity).await?
+        } else {
+            let mut audited = Vec::with_capacity(size as usize);
+            let mut offset = 0u64;
+            while offset < size {
+                let end = offset.saturating_add(RANGE).min(size);
+                let range = ByteRange::new(offset, end, size).map_err(|e| format!("{e:?}"))?;
+                audited.extend(partial_adapter::audit_clean_closed_fixture(
+                    &root, identity, range,
+                )?);
+                offset = end;
+            }
+            audited
+        };
+        if audited.len() as u64 != size || *blake3::hash(&audited).as_bytes() != manifest.id.0 {
+            return Err("cold physical readback did not match the trusted root".into());
+        }
+        owner.validate_fence()
+            .map_err(|e| format!("final local custody: {e}"))?;
+        output.write_all(&audited)
+            .map_err(|e| format!("write private stage: {e}"))?;
+    }
+    output.sync_all()
         .map_err(|e| format!("sync private stage: {e}"))?;
     drop(output);
+
+    if large {
+        // Fresh descriptor after the actual staged write: this checks the
+        // physical staged bytes, not the in-memory range reconstruction.
+        let mut readback = fs::File::open(&staged)
+            .map_err(|e| format!("cold final large stage open: {e}"))?;
+        stream_to_uncommitted_quarantine(
+            &mut readback, &mut io::sink(), manifest, &cancelled,
+        )
+        .map_err(|e| format!("post-write cold stage BLAKE3/size audit: {e:?}"))?;
+        owner.validate_fence()
+            .map_err(|e| format!("large final staging OS custody: {e}"))?;
+    }
     #[cfg(windows)]
     {
         windows_private_stage::verify_owner_only_staging_root(&root)
@@ -981,6 +1022,20 @@ async fn main() -> Result<(), String> {
             if args.next().is_some() { return Err("unexpected serve argument".into()); }
             serve(Path::new(&source), &peer).await
         }
+        "serve-large" => {
+            let path = args.next().ok_or("serve-large requires synthetic source path")?;
+            let peer = args.next().ok_or("serve-large requires receiver EndpointId")?;
+            if args.next().is_some() {
+                return Err("unexpected serve-large argument".into());
+            }
+            serve_large(Path::new(&path), &peer).await
+        }
+        "receive-large" => {
+            if args.next().is_some() {
+                return Err("receive-large takes no arguments".into());
+            }
+            receive(false, true).await
+        }
         "serve-batch" => {
             let allowed = args.next().ok_or("serve-batch requires receiver EndpointId")?;
             let sources = args.map(PathBuf::from).collect::<Vec<_>>();
@@ -1007,7 +1062,7 @@ async fn main() -> Result<(), String> {
             if args.next().is_some() {
                 return Err("unexpected receive argument".into());
             }
-            receive(lab_drop).await
+            receive(lab_drop, false).await
         }
         _ => Err("usage: staya-direct-preview receive | serve <file> <receiver-id>; manual direct-only private staging".into())
     }
