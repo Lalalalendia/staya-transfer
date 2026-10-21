@@ -32,6 +32,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Validate exact immutable Cargo.lock
+        shell: bash
         run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1 > /dev/null
       - name: Check Staya opt-in preview formatting
         run: cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check

@@ -751,11 +751,7 @@ fn provider_refuses_real_quic_before_sender_arms_and_then_stages_exact_file() {
     assert!(report.starts_with("STAGED_QUEUE 0 "), "{report}");
     assert!(report.contains(&format!("ROOT={}", blake3::hash(&bytes).to_hex())));
     assert!(report.contains("VERIFIED_ITEMS=1/1"));
-    assert!(report.contains(&format!(
-        "VERIFIED_BYTES={}/{}",
-        bytes.len(),
-        bytes.len()
-    )));
+    assert!(report.contains(&format!("VERIFIED_BYTES={}/{}", bytes.len(), bytes.len())));
     assert!(report.contains("NOT_APPLIED=true"));
     let stage = PathBuf::from(
         report
@@ -763,7 +759,7 @@ fn provider_refuses_real_quic_before_sender_arms_and_then_stages_exact_file() {
             .unwrap()
             .split(" ROOT=")
             .next()
-            .unwrap()
+            .unwrap(),
     );
     let cold_bytes = fs::read(&stage).expect("independently read actual written stage");
     assert_eq!(cold_bytes, bytes);

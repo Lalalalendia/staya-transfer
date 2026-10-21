@@ -157,11 +157,10 @@ fn deny_unlisted_with_gate(
         while let Some(event) = events.recv().await {
             match event {
                 ProviderMessage::ClientConnected(e) => {
-                    let permitted = gate_active(&armed, expires_at)
-                        && e.endpoint_id == Some(allowed);
-                    let _ = e
-                        .tx
-                        .send(if permitted {
+                    let permitted =
+                        gate_active(&armed, expires_at) && e.endpoint_id == Some(allowed);
+                    let _ =
+                        e.tx.send(if permitted {
                             Ok(())
                         } else {
                             Err(AbortReason::Permission)
@@ -172,9 +171,8 @@ fn deny_unlisted_with_gate(
                     let permitted = gate_active(&armed, expires_at)
                         && hashes.contains(&e.request.hash)
                         && e.request.ranges.is_blob();
-                    let _ = e
-                        .tx
-                        .send(if permitted {
+                    let _ =
+                        e.tx.send(if permitted {
                             Ok(())
                         } else {
                             Err(AbortReason::Permission)
@@ -676,10 +674,7 @@ async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
 /// One physical receiver OS process and one QUIC endpoint for all selected
 /// objects. CONNECT_BATCH is manually accepted over an authenticated offline
 /// operator channel; it MUST NOT be treated as an unsolicited network grant.
-async fn receive_batch(
-    lab_probe_unlisted: bool,
-    lab_probe_before_arm: bool,
-) -> Result<(), String> {
+async fn receive_batch(lab_probe_unlisted: bool, lab_probe_before_arm: bool) -> Result<(), String> {
     let key = SecretKey::generate();
     println!("PEER_ID {}", key.public());
     io::stdout()
@@ -735,27 +730,20 @@ async fn receive_batch(
     if lab_probe_before_arm {
         // Actual early network access using the authorized ephemeral receiver
         // key must fail while the sender's provider is not yet armed.
-        let first = Hash::from_bytes(
-            queue.current().ok_or("empty selected queue")?.manifest.id.0
-        );
-        let denied = match tokio::time::timeout(
-            STEP_TIMEOUT,
-            ep.connect(address.clone(), iroh_blobs::ALPN),
-        )
-        .await
-        {
-            Ok(Err(_)) => true,
-            Ok(Ok(conn)) => {
-                let attempt = tokio::time::timeout(
-                    STEP_TIMEOUT,
-                    bounded_get(&conn, first, 0..1),
-                )
-                .await;
-                conn.close(0u8.into(), b"pre-arm refusal");
-                matches!(attempt, Ok(Err(_)))
-            }
-            Err(_) => false,
-        };
+        let first = Hash::from_bytes(queue.current().ok_or("empty selected queue")?.manifest.id.0);
+        let denied =
+            match tokio::time::timeout(STEP_TIMEOUT, ep.connect(address.clone(), iroh_blobs::ALPN))
+                .await
+            {
+                Ok(Err(_)) => true,
+                Ok(Ok(conn)) => {
+                    let attempt =
+                        tokio::time::timeout(STEP_TIMEOUT, bounded_get(&conn, first, 0..1)).await;
+                    conn.close(0u8.into(), b"pre-arm refusal");
+                    matches!(attempt, Ok(Err(_)))
+                }
+                Err(_) => false,
+            };
         if !denied {
             return Err("pre-arm authenticated peer GET was not explicitly denied".into());
         }
