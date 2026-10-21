@@ -55,9 +55,7 @@ fn limits() -> Limits {
 }
 
 fn payload() -> Vec<u8> {
-    (0..LEN)
-        .map(|i| ((i * 37 + 11) % 251) as u8)
-        .collect()
+    (0..LEN).map(|i| ((i * 37 + 11) % 251) as u8).collect()
 }
 
 fn digest() -> blake3::Hash {
@@ -95,11 +93,19 @@ impl Drop for ChildGuard {
 /// It is explicitly complete BEFORE entering the cancellation shutdown test.
 async fn seed(root: &Path) {
     let owner = StoreLease::acquire(root).expect("seed owns exclusive physical store");
-    let store = FsStore::load(root).await.expect("pinned real actor for seed");
+    let store = FsStore::load(root)
+        .await
+        .expect("pinned real actor for seed");
     let bytes = payload();
-    let tag = store.add_slice(&bytes).await.expect("seed real FsStore bytes");
+    let tag = store
+        .add_slice(&bytes)
+        .await
+        .expect("seed real FsStore bytes");
     assert_eq!(tag.hash.as_bytes(), digest().as_bytes());
-    store.shutdown().await.expect("complete physical baseline shutdown");
+    store
+        .shutdown()
+        .await
+        .expect("complete physical baseline shutdown");
     drop(tag);
     drop(store);
     drop(owner);
@@ -116,10 +122,15 @@ fn audit_physical_bao(root: &Path) {
     let data_path = root.join("data").join(format!("{hex}.data"));
     let bao_path = root.join("data").join(format!("{hex}.obao4"));
     let bytes = payload();
-    assert_eq!(fs::read(&data_path).expect("post-crash physical data"), bytes);
+    assert_eq!(
+        fs::read(&data_path).expect("post-crash physical data"),
+        bytes
+    );
     let tree = BaoTree::new(LEN as u64, BlockSize::from_chunk_log(4));
     assert_eq!(
-        fs::metadata(&bao_path).expect("physical disk outboard").len(),
+        fs::metadata(&bao_path)
+            .expect("physical disk outboard")
+            .len(),
         tree.outboard_size()
     );
     let data = File::open(data_path).expect("cold disk data");
@@ -151,10 +162,8 @@ async fn child(stage: &str, root: &Path, marker: &Path) {
             // The future actually enters FsStore::load: not a simulated
             // OpeningFsStore guard. A Ready result is NOT evidence and fails.
             let mut load = Box::pin(ActiveFsStore::open(root, limits()));
-            let pending = std::future::poll_fn(|cx| {
-                Poll::Ready(load.as_mut().poll(cx).is_pending())
-            })
-            .await;
+            let pending =
+                std::future::poll_fn(|cx| Poll::Ready(load.as_mut().poll(cx).is_pending())).await;
             assert!(
                 pending,
                 "actual pinned FsStore::load returned Ready on first poll; cannot claim in-flight cancellation"
@@ -173,10 +182,9 @@ async fn child(stage: &str, root: &Path, marker: &Path) {
                 "no outstanding test permits may exist"
             );
             let mut shutdown = Box::pin(closing.finish());
-            let pending = std::future::poll_fn(|cx| {
-                Poll::Ready(shutdown.as_mut().poll(cx).is_pending())
-            })
-            .await;
+            let pending =
+                std::future::poll_fn(|cx| Poll::Ready(shutdown.as_mut().poll(cx).is_pending()))
+                    .await;
             assert!(
                 pending,
                 "real FsStore::shutdown returned Ready on first poll; cannot claim in-flight cancellation"
@@ -212,11 +220,12 @@ async fn real_polled_fsstore_load_and_shutdown_cancellation_retains_os_custody()
             .duration_since(UNIX_EPOCH)
             .expect("valid test clock")
             .as_nanos();
-        let base = std::env::temp_dir().join(format!(
-            "staya-g2-05h3g6-{}-{stage}-{stamp}",
-            process::id()
-        ));
-        assert!(!base.exists(), "only use disposable private test directories");
+        let base =
+            std::env::temp_dir().join(format!("staya-g2-05h3g6-{}-{stage}-{stamp}", process::id()));
+        assert!(
+            !base.exists(),
+            "only use disposable private test directories"
+        );
         let root = base.join("store");
         let marker = base.join("future-cancelled");
         fs::create_dir_all(&root).expect("prepare new root");
@@ -253,15 +262,30 @@ async fn real_polled_fsstore_load_and_shutdown_cancellation_retains_os_custody()
             ),
             "post-cancellation child holds OS custody until real process death"
         );
-        child.0.as_mut().unwrap().kill().expect("real OS hard termination");
-        let status = child.0.take().unwrap().wait().expect("reap actual OS child");
+        child
+            .0
+            .as_mut()
+            .unwrap()
+            .kill()
+            .expect("real OS hard termination");
+        let status = child
+            .0
+            .take()
+            .unwrap()
+            .wait()
+            .expect("reap actual OS child");
         assert!(!status.success(), "child must not issue clean actor ACK");
         let new_owner = StoreLease::acquire(&root)
             .expect("independent OS custody reacquired only after killed child");
         assert!(
-            read_candidates(&new_owner, *digest().as_bytes(), LEN as u64, IROH_PREORDER_16K)
-                .expect("read post-crash candidates")
-                .is_empty(),
+            read_candidates(
+                &new_owner,
+                *digest().as_bytes(),
+                LEN as u64,
+                IROH_PREORDER_16K
+            )
+            .expect("read post-crash candidates")
+            .is_empty(),
             "cancelled actor futures can never create verified checkpoint claims"
         );
         if stage == "shutdown" {
