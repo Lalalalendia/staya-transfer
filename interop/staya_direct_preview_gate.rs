@@ -566,6 +566,22 @@ fn one_provider_one_receiver_one_quic_connection_serves_exact_selected_set() {
         assert!(report.contains(&format!("ROOT={}", blake3::hash(bytes).to_hex())));
         assert!(report.contains(&format!("SIZE={}", bytes.len())));
         assert!(report.contains("NOT_APPLIED=true"));
+        let verified_bytes: usize = payloads[..=i].iter().map(Vec::len).sum();
+        let selected_bytes: usize = payloads.iter().map(Vec::len).sum();
+        assert!(
+            report.contains(&format!("VERIFIED_ITEMS={}/{}", i + 1, payloads.len())),
+            "unverified item count must never be reported as complete: {report}"
+        );
+        assert!(
+            report.contains(&format!("VERIFIED_BYTES={verified_bytes}/{selected_bytes}")),
+            "batch progress must reflect exact local root-verified bytes: {report}"
+        );
+        let expected_phase = if i + 1 == payloads.len() {
+            "Complete"
+        } else {
+            "Running"
+        };
+        assert!(report.contains(&format!("PHASE={expected_phase}")));
         let stage = PathBuf::from(
             report
                 .strip_prefix(&format!("STAGED_QUEUE {i} "))
@@ -626,6 +642,10 @@ fn one_provider_one_receiver_one_quic_connection_serves_exact_selected_set() {
     );
     assert!(final_line.contains(&hex_digest(&commit)));
     assert!(final_line.contains("NOT_APPLIED=true"));
+    let final_bytes: usize = payloads.iter().map(Vec::len).sum();
+    assert!(final_line.contains("VERIFIED_ITEMS=3/3"));
+    assert!(final_line.contains(&format!("VERIFIED_BYTES={final_bytes}/{final_bytes}")));
+    assert!(final_line.contains("PHASE=Complete"));
     assert!(
         final_line.contains("RECONNECTS=0"),
         "one physical QUIC connection was not proven: {final_line}"
