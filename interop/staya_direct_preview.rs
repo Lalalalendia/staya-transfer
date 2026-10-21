@@ -416,9 +416,12 @@ async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
     // An independent second File descriptor re-reads the physical spool.
     let mut spool_cold = fs::File::open(&spool_path)
         .map_err(|e| format!("cold source spool open: {e}"))?;
-    stream_to_uncommitted_quarantine(
+    let cold_spool = stream_to_uncommitted_quarantine(
         &mut spool_cold, &mut io::sink(), manifest, &cancelled,
     ).map_err(|e| format!("cold source spool BLAKE3 mismatch: {e:?}"))?;
+    if cold_spool.root != manifest.id || cold_spool.bytes != manifest.size {
+        return Err("cold source spool receipt did not match pinned selection".into());
+    }
     drop(spool_cold);
 
     let store = FsStore::load(&root)
@@ -738,10 +741,13 @@ async fn receive(lab_drop_after_first_range: bool, large: bool) -> Result<(), St
         // physical staged bytes, not the in-memory range reconstruction.
         let mut readback = fs::File::open(&staged)
             .map_err(|e| format!("cold final large stage open: {e}"))?;
-        stream_to_uncommitted_quarantine(
+        let cold_stage = stream_to_uncommitted_quarantine(
             &mut readback, &mut io::sink(), manifest, &cancelled,
         )
         .map_err(|e| format!("post-write cold stage BLAKE3/size audit: {e:?}"))?;
+        if cold_stage.root != manifest.id || cold_stage.bytes != manifest.size {
+            return Err("post-write final stage receipt differs from pinned root".into());
+        }
         owner.validate_fence()
             .map_err(|e| format!("large final staging OS custody: {e}"))?;
     }
