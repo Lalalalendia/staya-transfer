@@ -4,6 +4,7 @@ on:
     paths:
       - 'interop/**'
       - 'custody/**'
+      - 'native-windows-host/**'
       - '.github/workflows/g2-windows-fsstore-kill.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -13,6 +14,7 @@ on:
     paths:
       - 'interop/**'
       - 'custody/**'
+      - 'native-windows-host/**'
       - '.github/workflows/g2-windows-fsstore-kill.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -80,10 +82,10 @@ jobs:
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_store_worker_gate -- --exact real_fsstore_native_containment_survives_parent_kill --nocapture
       - name: STY-G2-05h3g4 real Windows FsStore refuses unarmed/forged/missing IPC
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_store_worker_gate real_fsstore_windows_ipc_denies_ -- --nocapture
-      - name: STY-G2-05h3g6 actual pending FsStore futures interrupted by OS kill
-        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_async_cancel_gate -- --exact real_polled_fsstore_load_and_shutdown_cancellation_retains_os_custody --nocapture
       - name: Strict Windows integration lint
         run: cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --all-targets -- -D warnings
+      - name: STY-G2-05h3g6 actual pending FsStore futures interrupted by OS kill
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test fsstore_async_cancel_gate -- --exact real_polled_fsstore_load_and_shutdown_cancellation_retains_os_custody --nocapture
       - name: Windows integration format
         run: cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
 
