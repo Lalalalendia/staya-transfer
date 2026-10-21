@@ -26,10 +26,11 @@ use staya_transfer::{
     bao::{MAX_BAO_PROOF_BYTES, verify_bao_range},
     queue::{ItemOutcome, QueuePhase, QueueSelection, SelectedFile},
     recovery::{BaoStorageProfile, StoreIdentity},
+    source_stream::{STREAM_BUFFER_BYTES, stream_to_uncommitted_quarantine},
 };
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::atomic::AtomicBool,
@@ -45,6 +46,8 @@ mod partial_adapter;
 mod windows_private_stage;
 
 const MAX_OBJECT: u64 = 8 * 1024 * 1024;
+// Opt-in real single-file QUIC laboratory path, never a batch/user-vault limit.
+const MAX_LARGE_OBJECT: u64 = 16 * 1024 * 1024;
 const RANGE: u64 = 64 * 1024;
 const STEP_TIMEOUT: Duration = Duration::from_secs(20);
 // Global session budget: a broken peer cannot cause unbounded network retries.
@@ -325,6 +328,131 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     drop(tag);
     drop(store);
     fs::remove_dir_all(root).map_err(|e| format!("clean private provider data: {e}"))?;
+    Ok(())
+}
+
+
+/// G1m-b1: bounded >8 MiB real direct QUIC sender. A *single* locally
+/// selected pre-opened regular source handle supplies all bytes; the bytes
+/// are copied into a generated private spool using 64 KiB fixed buffering.
+/// Only after full BLAKE3, on-disk spool re-read and protected FsStore
+/// add_path(Copy) may the sender announce an object to ONE selected peer.
+///
+/// The original pathname open is NOT native reparse/symlink-race proof. This
+/// is synthetic/manual lab only, with no Device/Vault grant or File Gate.
+async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
+    let prior = fs::symlink_metadata(source)
+        .map_err(|e| format!("inspect large selected source: {e}"))?;
+    if !prior.is_file()
+        || prior.file_type().is_symlink()
+        || prior.len() <= MAX_OBJECT
+        || prior.len() > MAX_LARGE_OBJECT
+    {
+        return Err("large preview requires regular non-symlink file >8 MiB and <=16 MiB".into());
+    }
+    let allowed = EndpointId::from_str(allowed_text)
+        .map_err(|e| format!("invalid explicitly selected large-file receiver: {e}"))?;
+    let mut opened = OpenOptions::new()
+        .read(true)
+        .open(source)
+        .map_err(|e| format!("open selected large-file handle: {e}"))?;
+    let pinned = opened.metadata()
+        .map_err(|e| format!("stat selected large-file handle: {e}"))?;
+    if !pinned.is_file() || pinned.len() != prior.len() {
+        return Err("selected large-file handle changed type or length".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if prior.dev() != pinned.dev() || prior.ino() != pinned.ino() {
+            return Err("selected large-file pathname replaced before opening".into());
+        }
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; STREAM_BUFFER_BYTES];
+    let mut total = 0u64;
+    loop {
+        let count = match opened.read(&mut buffer) {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(format!("hash selected handle: {e}")),
+        };
+        if count == 0 {
+            break;
+        }
+        total = total.checked_add(count as u64).ok_or("large source byte counter overflow")?;
+        if total > MAX_LARGE_OBJECT {
+            return Err("large selected source exceeded strict 16 MiB limit".into());
+        }
+        hasher.update(&buffer[..count]);
+    }
+    if total != prior.len() || opened.metadata().map_err(|e| e.to_string())?.len() != total {
+        return Err("large selected source changed size during initial root binding".into());
+    }
+    let manifest = Manifest {
+        id: ContentId(*hasher.finalize().as_bytes()),
+        size: total,
+    };
+    opened.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("rewind selected descriptor: {e}"))?;
+
+    let root = private_root("large-sender")?;
+    let spool_path = root.join("pinned-source-spool.bin");
+    let mut spool = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&spool_path)
+        .map_err(|e| format!("create private uncommitted source spool: {e}"))?;
+    let cancelled = AtomicBool::new(false);
+    let copied = stream_to_uncommitted_quarantine(
+        &mut opened, &mut spool, manifest, &cancelled,
+    ).map_err(|e| format!("bounded selected source stream refused: {e:?}"))?;
+    if copied.bytes != manifest.size || copied.max_requested_read_bytes > STREAM_BUFFER_BYTES {
+        return Err("bounded input stream did not verify the selected object".into());
+    }
+    spool.sync_all().map_err(|e| format!("sync private source spool: {e}"))?;
+    drop(spool);
+    // An independent second File descriptor re-reads the physical spool.
+    let mut spool_cold = fs::File::open(&spool_path)
+        .map_err(|e| format!("cold source spool open: {e}"))?;
+    stream_to_uncommitted_quarantine(
+        &mut spool_cold, &mut io::sink(), manifest, &cancelled,
+    ).map_err(|e| format!("cold source spool BLAKE3 mismatch: {e:?}"))?;
+    drop(spool_cold);
+
+    let store = FsStore::load(&root)
+        .await
+        .map_err(|e| format!("large sender protected FsStore: {e}"))?;
+    // The pinned 0.103.1 release and pinned fork support add_path in Copy
+    // mode: unlike add_slice, it does not allocate an entire >8MiB Bytes blob.
+    let stored = store.add_path(&spool_path).await
+        .map_err(|e| format!("streamed large source FsStore import: {e}"))?;
+    let wanted = Hash::from_bytes(manifest.id.0);
+    if stored.hash != wanted {
+        return Err("FsStore add_path returned a different large-object BLAKE3 root".into());
+    }
+    let (policy, worker) = deny_unlisted(allowed, vec![wanted]);
+    let ep = endpoint(SecretKey::generate()).await?;
+    let router = Router::builder(ep)
+        .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(policy)))
+        .spawn();
+    let ticket = postcard::to_stdvec(&router.endpoint().addr())
+        .map_err(|e| format!("serialize large-file direct endpoint: {e}"))?;
+    println!("CONNECT {} {} {}", hex(&ticket), wanted.to_hex(), manifest.size);
+    io::stdout().flush().map_err(|e| format!("announce manually approved large file: {e}"))?;
+    tokio::task::spawn_blocking(|| {
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)
+    })
+    .await
+    .map_err(|e| format!("large sender operator session: {e}"))?
+    .map_err(|e| format!("large sender operator input: {e}"))?;
+    router.shutdown().await.map_err(|e| format!("large sender shutdown: {e}"))?;
+    worker.abort();
+    drop(stored);
+    drop(store);
+    fs::remove_dir_all(root).map_err(|e| format!("clean large sender private data: {e}"))?;
     Ok(())
 }
 
