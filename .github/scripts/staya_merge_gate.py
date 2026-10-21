@@ -104,6 +104,28 @@ def latest_runs(api: str, token: str, repository: str, sha: str, pr_number: int)
     return selected
 
 
+
+def pending_or_fail(required: set[str], runs: dict[str, dict], sha: str):
+    """Return pending names, or fail immediately for ANY non-success terminal."""
+    pending = []
+    for name in sorted(required):
+        run = runs.get(name)
+        if run is None:
+            pending.append(f"{name}: not started")
+            continue
+        status = run.get("status")
+        conclusion = run.get("conclusion")
+        if status == "completed" and conclusion == "success":
+            continue
+        if status == "completed":
+            raise RuntimeError(
+                f"required workflow {name} concluded {conclusion or 'unknown'} "
+                f"on exact head {sha}: {run.get('html_url')}"
+            )
+        pending.append(f"{name}: {status or 'unknown'}")
+    return pending
+
+
 def check_current_pr(api: str, token: str, repository: str, number: int, sha: str):
     pr = api_get(api, token, f"/repos/{repository}/pulls/{number}")
     if pr["state"] != "open" or pr["head"]["sha"] != sha:
@@ -156,25 +178,7 @@ def main():
     while time.monotonic() - start < timeout_seconds:
         check_current_pr(api, token, repository, pr_number, sha)
         runs = latest_runs(api, token, repository, sha, pr_number)
-        pending = []
-        for name in sorted(required):
-            run = runs.get(name)
-            if run is None:
-                pending.append(f"{name}: not started")
-                continue
-            status = run.get("status")
-            conclusion = run.get("conclusion")
-            if status == "completed" and conclusion == "success":
-                continue
-            if status == "completed" and conclusion in (
-                "failure", "cancelled", "timed_out", "action_required",
-                "startup_failure", "skipped", "neutral",
-            ):
-                raise RuntimeError(
-                    f"required workflow {name} concluded {conclusion} "
-                    f"on exact head {sha}: {run.get('html_url')}"
-                )
-            pending.append(f"{name}: {status or 'unknown'}")
+        pending = pending_or_fail(required, runs, sha)
         if not pending:
             check_current_pr(api, token, repository, pr_number, sha)
             summary(
