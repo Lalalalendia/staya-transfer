@@ -78,7 +78,13 @@ jobs:
             'interop/owner-witness-lab/owner_two_authority.go',
             'interop/owner-witness-lab/owner_two_authority_test.go',
           }
-          assert actual in (expected, expected|quorum_layer, expected|quorum_layer|ydb_layer, expected|quorum_layer|ydb_layer|signed_layer, expected|quorum_layer|ydb_layer|signed_layer|writer_layer, expected|quorum_layer|ydb_layer|signed_layer|writer_layer|two_layer), ('out of lab scope', actual)
+          worm_layer={
+            'interop/owner-witness-lab/owner_worm_audit.go',
+            'interop/owner-witness-lab/owner_worm_audit_test.go',
+            'docs/ADR-0034-s3-compliance-worm-read-only.md',
+            '.github/workflows/owner-worm-audit.yml',
+          }
+          assert actual in (expected, expected|quorum_layer, expected|quorum_layer|ydb_layer, expected|quorum_layer|ydb_layer|signed_layer, expected|quorum_layer|ydb_layer|signed_layer|writer_layer, expected|quorum_layer|ydb_layer|signed_layer|writer_layer|two_layer, expected|quorum_layer|ydb_layer|signed_layer|writer_layer|two_layer|worm_layer), ('out of lab scope', actual)
           assert not any(n.startswith(('src/','custody/','interop/fork/')) for n in actual)
           PY
           git diff --check

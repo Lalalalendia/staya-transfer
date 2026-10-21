@@ -57,7 +57,13 @@ jobs:
             'interop/owner-witness-lab/owner_two_authority.go',
             'interop/owner-witness-lab/owner_two_authority_test.go',
           }
-          assert actual in (expected, expected|two_layer), ('unexpected writer lab scope',actual^expected)
+          worm_layer={
+            'interop/owner-witness-lab/owner_worm_audit.go',
+            'interop/owner-witness-lab/owner_worm_audit_test.go',
+            'docs/ADR-0034-s3-compliance-worm-read-only.md',
+            '.github/workflows/owner-worm-audit.yml',
+          }
+          assert actual in (expected, expected|two_layer, expected|two_layer|worm_layer), ('unexpected writer lab scope',actual^expected)
           assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in actual)
           PY
           git diff --check

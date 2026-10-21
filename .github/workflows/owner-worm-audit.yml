@@ -1,0 +1,78 @@
+name: STY read-only S3 COMPLIANCE WORM high-water preflight lab
+
+on:
+  push:
+    branches: ["experiment/sty-online-owner-worm-audit-*"]
+  pull_request:
+    paths:
+      - "interop/owner-witness-lab/owner_worm_audit.go"
+      - "interop/owner-witness-lab/owner_worm_audit_test.go"
+      - "docs/ADR-0034-s3-compliance-worm-read-only.md"
+      - ".github/workflows/owner-worm-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  worm-audit-read-only:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: Restrict exact diff to WORM laboratory and inherited CI allowlists
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          base='342a2945b09f6f1b7497e2d1136c3b37bac22e5b'
+          changed=set(subprocess.check_output(['git','diff','--name-only',base+'..HEAD'],text=True).splitlines())
+          expected={
+              'interop/owner-witness-lab/owner_worm_audit.go',
+              'interop/owner-witness-lab/owner_worm_audit_test.go',
+              'docs/ADR-0034-s3-compliance-worm-read-only.md',
+              '.github/workflows/owner-worm-audit.yml',
+              '.github/workflows/owner-two-authority.yml',
+              '.github/workflows/owner-mtls-writer.yml',
+              '.github/workflows/owner-signed-deny.yml',
+              '.github/workflows/owner-ydb-cas.yml',
+              '.github/workflows/owner-remote-quorum.yml',
+              '.github/workflows/owner-anchor-gate.yml',
+              '.github/workflows/owner-ledger-cas.yml',
+              '.github/workflows/owner-witness.yml',
+          }
+          assert changed == expected, ('unauthorized or incomplete WORM lab',changed^expected)
+          assert not any(p.startswith(('src/','custody/','interop/fork/','aquilum-app/')) for p in changed)
+          PY
+          git diff --check
+      - name: Signed full-history, expiry falsifiers and independent local AWS CLI mock
+        working-directory: interop/owner-witness-lab
+        shell: bash
+        env:
+          STY_WORM_LIVE_READ: "0"
+        run: |
+          set -euo pipefail
+          go test -count=1 ./...
+          go vet ./...
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            test -z "$(gofmt -l .)"
+            go test -race -count=1 ./...
+          fi
+      - name: Mandatory evidence boundary
+        shell: bash
+        run: |
+          echo 'Read-only AWS CLI test is LOCAL MOCK only; no real Yandex Object Storage or independent credentials.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'S3 COMPLIANCE applies to versions, expires, and allows new versions under the same key.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No immutable lifetime guarantee, positive grants, File Gate, APPLIED, ACK or P2P file writes.' >> "$GITHUB_STEP_SUMMARY"
