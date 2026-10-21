@@ -17,6 +17,8 @@ pub mod recovery;
 
 pub mod source_snapshot;
 
+pub mod source_stream;
+
 #[cfg(feature = "bao")]
 pub mod bao;
 
