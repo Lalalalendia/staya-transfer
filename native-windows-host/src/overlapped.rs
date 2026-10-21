@@ -184,7 +184,11 @@ pub(crate) fn connect(handle: RawHandle, deadline: Instant) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn read_exact(handle: RawHandle, mut bytes: &mut [u8], deadline: Instant) -> io::Result<()> {
+pub(crate) fn read_exact(
+    handle: RawHandle,
+    mut bytes: &mut [u8],
+    deadline: Instant,
+) -> io::Result<()> {
     while !bytes.is_empty() {
         let length = u32::try_from(bytes.len())
             .map_err(|_| io::Error::other("overlapped read frame oversized"))?;
