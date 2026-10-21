@@ -119,7 +119,11 @@ mod tests {
 
     impl PatternReader {
         fn new(size: u64) -> Self {
-            Self { size, offset: 0, interrupt_once: false }
+            Self {
+                size,
+                offset: 0,
+                interrupt_once: false,
+            }
         }
         fn value(i: u64) -> u8 {
             (i.wrapping_mul(37).wrapping_add(19) % 251) as u8
@@ -156,7 +160,10 @@ mod tests {
             }
             h.update(&b[..n]);
         }
-        Manifest { id: ContentId(*h.finalize().as_bytes()), size }
+        Manifest {
+            id: ContentId(*h.finalize().as_bytes()),
+            size,
+        }
     }
 
     #[test]
@@ -166,8 +173,12 @@ mod tests {
         let mut stage = io::sink();
         let manifest = selected(n);
         let receipt = stream_to_uncommitted_quarantine(
-            &mut source, &mut stage, manifest, &AtomicBool::new(false),
-        ).unwrap();
+            &mut source,
+            &mut stage,
+            manifest,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert_eq!(receipt.root, manifest.id);
         assert_eq!(receipt.bytes, n);
         assert!(receipt.read_calls > 500);
@@ -182,8 +193,12 @@ mod tests {
         source.interrupt_once = true;
         let mut stage = io::sink();
         let r = stream_to_uncommitted_quarantine(
-            &mut source, &mut stage, selected(n), &AtomicBool::new(false),
-        ).unwrap();
+            &mut source,
+            &mut stage,
+            selected(n),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert_eq!(r.read_calls, 2);
         assert_eq!(r.bytes, n);
     }
@@ -194,7 +209,10 @@ mod tests {
         let mut stage = Vec::new();
         assert!(matches!(
             stream_to_uncommitted_quarantine(
-                &mut source, &mut stage, selected(257), &AtomicBool::new(false)
+                &mut source,
+                &mut stage,
+                selected(257),
+                &AtomicBool::new(false)
             ),
             Err(StreamStageError::RootMismatch)
         ));
@@ -208,22 +226,33 @@ mod tests {
         let mut shorter = io::Cursor::new(vec![1; 7]);
         assert!(matches!(
             stream_to_uncommitted_quarantine(
-                &mut shorter, &mut stage, wanted, &AtomicBool::new(false)
+                &mut shorter,
+                &mut stage,
+                wanted,
+                &AtomicBool::new(false)
             ),
-            Err(StreamStageError::ShortRead { expected: 8, received: 7 })
+            Err(StreamStageError::ShortRead {
+                expected: 8,
+                received: 7
+            })
         ));
         stage.clear();
         let mut excess = io::Cursor::new(vec![1; 9]);
         assert!(matches!(
             stream_to_uncommitted_quarantine(
-                &mut excess, &mut stage, wanted, &AtomicBool::new(false)
+                &mut excess,
+                &mut stage,
+                wanted,
+                &AtomicBool::new(false)
             ),
             Err(StreamStageError::ExcessInput)
         ));
         assert_eq!(excess.position(), 9);
     }
 
-    struct FullDisk { available: usize }
+    struct FullDisk {
+        available: usize,
+    }
     impl Write for FullDisk {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             if self.available == 0 {
@@ -233,7 +262,9 @@ mod tests {
             self.available -= n;
             Ok(n)
         }
-        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -243,7 +274,10 @@ mod tests {
         let mut stage = FullDisk { available: 100 };
         assert!(matches!(
             stream_to_uncommitted_quarantine(
-                &mut source, &mut stage, selected(n), &AtomicBool::new(false)
+                &mut source,
+                &mut stage,
+                selected(n),
+                &AtomicBool::new(false)
             ),
             Err(StreamStageError::StagingIo(_))
         ));
@@ -256,7 +290,10 @@ mod tests {
         let mut stage = Vec::new();
         assert!(matches!(
             stream_to_uncommitted_quarantine(
-                &mut source, &mut stage, selected(n), &AtomicBool::new(true)
+                &mut source,
+                &mut stage,
+                selected(n),
+                &AtomicBool::new(true)
             ),
             Err(StreamStageError::Cancelled)
         ));
@@ -279,7 +316,10 @@ mod tests {
                 stream_to_uncommitted_quarantine(
                     &mut source,
                     &mut stage,
-                    Manifest { id: ContentId([0; 32]), size: n },
+                    Manifest {
+                        id: ContentId([0; 32]),
+                        size: n
+                    },
                     &AtomicBool::new(false)
                 ),
                 Err(StreamStageError::InvalidSize)
