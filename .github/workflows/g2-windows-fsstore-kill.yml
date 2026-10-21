@@ -66,6 +66,15 @@ jobs:
         env:
           STY_G1K_OUTPUT_DIR: ${{ github.workspace }}/g1k-ordered-queue
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact three_explicit_files_real_quic_serial_queue_with_physical_readback --nocapture
+      - name: STY-G1k-c real Windows direct batch session, denied outsider and object
+        env:
+          STY_G1K_SINGLE_OUTPUT_DIR: ${{ github.workspace }}/g1k-single-session
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_provider_one_receiver_one_quic_connection_serves_exact_selected_set --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-single-session-${{ matrix.variant }}
+          path: g1k-single-session/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: windows-queue-preview-${{ matrix.variant }}
@@ -119,3 +128,13 @@ jobs:
             cmp "queue/windows-queue-preview-release/$f" "queue/windows-queue-preview-fork/$f"
           done
           echo STY_G1K_WINDOWS_RELEASE_FORK_THREE_ACTUAL_QUIC_OBJECTS_IDENTICAL=true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: windows-single-session-*
+          path: single
+      - name: Compare one-session selected-object Windows bytes release/fork
+        run: |
+          for f in verified-000.bin verified-001.bin verified-002.bin inventory.txt; do
+            cmp "single/windows-single-session-release/$f" "single/windows-single-session-fork/$f"
+          done
+          echo STY_G1K_ONE_SESSION_WINDOWS_RELEASE_FORK_IDENTICAL=true
