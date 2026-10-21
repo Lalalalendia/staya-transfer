@@ -1,0 +1,64 @@
+name: STY Merge Gate
+
+# This workflow is ALWAYS present on PRs and has no path filter.
+# Protect main with the required status check STY Merge Gate / ready.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: sty-merge-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Validate merge policy (offline, no GitHub credential)
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+      - name: Fast format of all Rust workspaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in Cargo.toml custody/Cargo.toml native-host/Cargo.toml native-windows-host/Cargo.toml interop/release/Cargo.toml interop/fork/Cargo.toml; do
+            if [[ -f "$manifest" ]]; then
+              cargo fmt --manifest-path "$manifest" --all -- --check
+            fi
+          done
+      - name: Validate all GitHub Actions YAML syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].each { |file| YAML.parse_file(file) }; puts "All workflow YAML parsed"'
+
+  ready:
+    name: ready
+    if: github.event_name == 'pull_request'
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 115
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Wait for every applicable legacy workflow on the exact PR head SHA
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STY_PR_NUMBER: ${{ github.event.pull_request.number }}
+          STY_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          STY_GATE_TIMEOUT_SECONDS: "6300"
+        run: python3 .github/scripts/staya_merge_gate.py
