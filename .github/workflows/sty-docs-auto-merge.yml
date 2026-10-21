@@ -49,7 +49,7 @@ jobs:
               ...(protection?.contexts || []),
               ...(protection?.checks || []).map(item => item.context),
             ];
-            if (!required.includes('STY Merge Gate / ready')) {
+            if (!required.includes('staya-merge-ready')) {
               core.warning('Protected main does not require STY Merge Gate / ready; skip');
               return;
             }
