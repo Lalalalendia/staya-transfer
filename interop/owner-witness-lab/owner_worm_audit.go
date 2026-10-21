@@ -333,10 +333,26 @@ func (p ReadOnlyObjectLockPreflight) Read(ctx context.Context) ([]LockedWORMVers
 		path := temporary.Name()
 		temporary.Close()
 		// Untrusted output path is generated locally, never supplied by remote.
-		_, err = p.query(ctx, 16*1024, "get-object", "--bucket", p.Bucket, "--key", p.Key, "--version-id", v.VersionId, path)
+		response, err := p.query(ctx, 16*1024, "get-object", "--bucket", p.Bucket, "--key", p.Key, "--version-id", v.VersionId, path)
 		content, readErr := os.ReadFile(path)
 		_ = os.Remove(path)
-		if err != nil || readErr != nil || len(content) == 0 || len(content) > wormMaxObjectBytes {
+		// `get-object` writes its body to the local outfile but returns the
+		// response headers as JSON on stdout. The request's VersionId alone
+		// does NOT prove that the returned body belongs to that version.
+		// Bind returned version, length and opaque ETag to the first S3
+		// listing and downloaded bytes, independently of Ed25519 validation.
+		var object struct {
+			VersionId     string
+			ContentLength *int64
+			ETag          string
+			DeleteMarker  bool
+			ContentRange  string
+		}
+		if err != nil || readErr != nil || json.Unmarshal(response, &object) != nil ||
+			object.VersionId != v.VersionId || object.ETag == "" ||
+			v.ETag == "" || object.ETag != v.ETag || object.ContentLength == nil ||
+			*object.ContentLength != v.Size || int64(len(content)) != v.Size ||
+			len(content) == 0 || len(content) > wormMaxObjectBytes || object.DeleteMarker || object.ContentRange != "" {
 			return nil, ErrAnchorHold
 		}
 		out = append(out, LockedWORMVersion{ID: v.VersionId, Latest: v.IsLatest, Mode: retention.Retention.Mode, RetainUntil: until, Payload: content})

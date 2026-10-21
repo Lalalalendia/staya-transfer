@@ -274,24 +274,50 @@ case "$*" in
 *get-object-lock-configuration*) echo '{"ObjectLockConfiguration":{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Days":300}}}}' ;;
 *list-object-versions*)
     if [ "${STY_FAKE_AWS_MISSING_IS_TRUNCATED:-0}" = 1 ]; then
-      echo '{"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}'
+      echo '{"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":@V1SIZE@,"ETag":"fixture-v1"},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":@V0SIZE@,"ETag":"fixture-v0"}]}'
     elif [ "${STY_FAKE_AWS_MUTATE_LISTING:-0}" = 1 ]; then
       if [ -f "$STY_FAKE_AWS_ROOT/list_seen" ]; then
-        echo '{"IsTruncated":false,"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":false,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":true,"Size":440}]}'
+        echo '{"IsTruncated":false,"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":false,"Size":@V1SIZE@,"ETag":"fixture-v1"},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":true,"Size":@V0SIZE@,"ETag":"fixture-v0"}]}'
       else
         : > "$STY_FAKE_AWS_ROOT/list_seen"
-        echo '{"IsTruncated":false,"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}'
+        echo '{"IsTruncated":false,"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":@V1SIZE@,"ETag":"fixture-v1"},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":@V0SIZE@,"ETag":"fixture-v0"}]}'
       fi
     else
-      echo '{"IsTruncated":false,"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":440},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":440}]}'
+      if [ "${STY_FAKE_AWS_LIST_WRONG_SIZE:-0}" = 1 ]; then
+        echo '{"IsTruncated":false,"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":@V1PLUSS@,"ETag":"fixture-v1"},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":@V0SIZE@,"ETag":"fixture-v0"}]}'
+      else
+        echo '{"IsTruncated":false,"Versions":[{"Key":"audit/revocation.json","VersionId":"v1","IsLatest":true,"Size":@V1SIZE@,"ETag":"fixture-v1"},{"Key":"audit/revocation.json","VersionId":"v0","IsLatest":false,"Size":@V0SIZE@,"ETag":"fixture-v0"}]}'
+      fi
     fi ;;
 *get-object-retention*) echo '{"Retention":{"Mode":"COMPLIANCE","RetainUntilDate":"2027-08-20T12:00:00Z"}}' ;;
 *get-object*)
     eval "out=\${$#}"
-    case "$*" in *v1*) cp "$STY_FAKE_AWS_ROOT/v1.json" "$out" ;; *v0*) cp "$STY_FAKE_AWS_ROOT/v0.json" "$out" ;; *) exit 21 ;; esac
-    echo '{"ETag":"test"}' ;;
+    case "$*" in
+    *v1*)
+      cp "$STY_FAKE_AWS_ROOT/v1.json" "$out"
+      case "${STY_FAKE_AWS_META_FAIL:-}" in
+        wrong-version) echo '{"VersionId":"v0","ContentLength":@V1SIZE@,"ETag":"fixture-v1"}' ;;
+        wrong-length) echo '{"VersionId":"v1","ContentLength":@V1PLUSS@,"ETag":"fixture-v1"}' ;;
+        wrong-etag) echo '{"VersionId":"v1","ContentLength":@V1SIZE@,"ETag":"forged"}' ;;
+        missing-version) echo '{"ContentLength":@V1SIZE@,"ETag":"fixture-v1"}' ;;
+        missing-length) echo '{"VersionId":"v1","ETag":"fixture-v1"}' ;;
+        missing-etag) echo '{"VersionId":"v1","ContentLength":@V1SIZE@}' ;;
+        delete-marker) echo '{"VersionId":"v1","ContentLength":@V1SIZE@,"ETag":"fixture-v1","DeleteMarker":true}' ;;
+        *) echo '{"VersionId":"v1","ContentLength":@V1SIZE@,"ETag":"fixture-v1"}' ;;
+      esac ;;
+    *v0*) cp "$STY_FAKE_AWS_ROOT/v0.json" "$out"; echo '{"VersionId":"v0","ContentLength":@V0SIZE@,"ETag":"fixture-v0"}' ;;
+    *) exit 21 ;;
+    esac ;;
 *) exit 22 ;;
 esac`
+	// Version listings and GetObject metadata reflect the same actual body size.
+	// Keep the fixture strict: malformed metadata is a negative test, not a
+	// shortcut that hides missing validations in the real adapter.
+	script = strings.NewReplacer(
+		"@V1SIZE@", strconv.Itoa(len(versions[0].Payload)),
+		"@V1PLUSS@", strconv.Itoa(len(versions[0].Payload)+1),
+		"@V0SIZE@", strconv.Itoa(len(versions[1].Payload)),
+	).Replace(script)
 	path := filepath.Join(root, "aws-fixture")
 	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
 		t.Fatal(err)
@@ -345,6 +371,24 @@ esac`
 	if err := RunReadOnlyWORMPreflight(ctx, reader, pub, ydb, next, next, now); !errors.Is(err, ErrAnchorHold) {
 		t.Fatalf("S3 list missing IsTruncated was treated as complete: %v", err)
 	}
+	t.Setenv("STY_FAKE_AWS_MISSING_IS_TRUNCATED", "0")
+	// S3 response metadata must independently bind the exact listed version,
+	// object length and ETag to the downloaded signed bytes. A valid signature
+	// by itself does not prove GetObject returned the *requested* version.
+	for _, mode := range []string{"wrong-version", "wrong-length", "wrong-etag", "missing-version", "missing-length", "missing-etag", "delete-marker"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("STY_FAKE_AWS_META_FAIL", mode)
+			if err := RunReadOnlyWORMPreflight(ctx, reader, pub, ydb, next, next, now); !errors.Is(err, ErrAnchorHold) {
+				t.Fatalf("S3 GetObject inconsistent metadata was accepted for %s: %v", mode, err)
+			}
+		})
+	}
+	t.Run("wrong-listed-size", func(t *testing.T) {
+		t.Setenv("STY_FAKE_AWS_LIST_WRONG_SIZE", "1")
+		if err := RunReadOnlyWORMPreflight(ctx, reader, pub, ydb, next, next, now); !errors.Is(err, ErrAnchorHold) {
+			t.Fatalf("S3 listing size disagrees with signed bytes: %v", err)
+		}
+	})
 }
 
 // An attacker may legally delete an expired newer Object Lock version. A
