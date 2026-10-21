@@ -1,0 +1,81 @@
+name: STY Safe Docs Auto-merge Enrollment
+
+# Trusted base-branch workflow: do NOT checkout or execute PR files.
+# GitHub's native protected-branch auto-merge performs the actual merge.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  enroll:
+    name: docs-only
+    if: >-
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Enable native squash auto-merge only if main has enforced Merge Gate
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const {owner, repo} = context.repo;
+            const [settings, branch, response] = await Promise.all([
+              github.rest.repos.get({owner, repo}),
+              github.rest.repos.getBranch({owner, repo, branch: 'main'}),
+              github.rest.pulls.get({owner, repo, pull_number: context.issue.number}),
+            ]);
+            const pr = response.data;
+            if (pr.state !== 'open' || pr.draft || pr.base.ref !== 'main' ||
+                pr.head.repo?.id !== settings.data.id ||
+                pr.user.login !== owner) {
+              core.notice('Not a trusted owner-authored main PR; no auto-merge enrollment');
+              return;
+            }
+            // A settings/configuration error MUST NEVER fall back to unguarded merge.
+            if (!settings.data.allow_auto_merge || !branch.data.protected) {
+              core.notice('Auto-merge or main branch protection is not enabled; skip');
+              return;
+            }
+            const protection = branch.data.protection?.required_status_checks;
+            const required = [
+              ...(protection?.contexts || []),
+              ...(protection?.checks || []).map(item => item.context),
+            ];
+            if (!required.includes('STY Merge Gate / ready')) {
+              core.warning('Protected main does not require STY Merge Gate / ready; skip');
+              return;
+            }
+
+            // No PR checkout, no untrusted code, no arbitrary shell execution.
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            function docsPath(path) {
+              return path === 'README.md' ||
+                /^docs\/[a-zA-Z0-9_./-]+\.md$/.test(path);
+            }
+            const docsOnly = files.length > 0 && files.length <= 30 &&
+              files.every(file => docsPath(file.filename) &&
+                (file.status !== 'renamed' || docsPath(file.previous_filename)));
+            if (!docsOnly) {
+              core.notice('PR contains code, workflow, unknown paths or >30 files; manual decision');
+              return;
+            }
+            const query = 'mutation($id: ID!) {' +
+              ' enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH})' +
+              ' { clientMutationId } }';
+            try {
+              await github.graphql(query, {id: pr.node_id});
+              core.notice('Native SQUASH auto-merge armed. GitHub required checks still apply.');
+            } catch (err) {
+              // Never call mergePullRequest / git push as a fallback.
+              core.warning('Auto-merge not armed: ' + err.message);
+            }
