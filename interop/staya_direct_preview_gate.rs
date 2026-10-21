@@ -436,3 +436,258 @@ fn hex_digest(bytes: &[u8; 32]) -> String {
     }
     output
 }
+fn new_batch_receiver(probe_unlisted: bool) -> (OwnedProcess, Receiver<String>) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"));
+    cmd.arg("receive-batch");
+    if probe_unlisted {
+        cmd.arg("--lab-request-unlisted");
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("real one-session batch receiver OS process");
+    let received = capture(&mut child);
+    (OwnedProcess(child), received)
+}
+
+#[test]
+fn one_provider_one_receiver_one_quic_connection_serves_exact_selected_set() {
+    use staya_transfer::{
+        ContentId, Manifest,
+        queue::{ItemOutcome, QueuePhase, QueueSelection, SelectedFile},
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let fixture =
+        std::env::temp_dir().join(format!("staya-g1k-single-{}-{nonce}", std::process::id()));
+    fs::create_dir(&fixture).expect("disposable local selected sources");
+    let payloads = [
+        vec![0x33],
+        (0..64 * 1024)
+            .map(|i| ((i * 31 + 29) % 251) as u8)
+            .collect(),
+        (0..1024 * 1024 + 17)
+            .map(|i| ((i * 43 + 7) % 251) as u8)
+            .collect(),
+    ];
+    let mut paths = Vec::new();
+    let mut entries = Vec::new();
+    for (i, bytes) in payloads.iter().enumerate() {
+        let label = format!("batch-{i:03}.bin");
+        let path = fixture.join(&label);
+        fs::write(&path, bytes).expect("write locally selected synthetic file");
+        entries.push(SelectedFile {
+            label,
+            manifest: Manifest {
+                id: ContentId(*blake3::hash(bytes).as_bytes()),
+                size: bytes.len() as u64,
+            },
+        });
+        paths.push(path);
+    }
+    let selection = QueueSelection::new(entries.clone()).unwrap();
+    let commit = selection.commitment();
+    let mut queue = selection.into_cursor();
+
+    let (mut receiver, receiver_lines) = new_batch_receiver(true);
+    let receiver_id = next_line(&receiver_lines)
+        .strip_prefix("PEER_ID ")
+        .expect("batch receiver announces one ephemeral ID")
+        .to_owned();
+    let mut provider_cmd = Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"));
+    provider_cmd
+        .arg("serve-batch")
+        .arg(&receiver_id)
+        .args(&paths)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let mut provider = OwnedProcess(provider_cmd.spawn().expect("real batch provider process"));
+    let provider_lines = capture(&mut provider.0);
+    let invitation = next_line(&provider_lines);
+    let parts: Vec<_> = invitation.split_whitespace().collect();
+    assert_eq!(parts[0], "CONNECT_BATCH");
+    assert_eq!(parts.len(), 4 + 3 * 3);
+    assert_eq!(parts[2], hex_digest(&commit));
+    assert_eq!(parts[3], "3");
+    for i in 0..3 {
+        let pos = 4 + i * 3;
+        assert_eq!(parts[pos], entries[i].label);
+        assert_eq!(parts[pos + 1], blake3::hash(&payloads[i]).to_hex().as_str());
+        assert_eq!(parts[pos + 2], payloads[i].len().to_string());
+    }
+
+    let (mut unlisted, outsider_lines) = new_batch_receiver(false);
+    let other_id = next_line(&outsider_lines)
+        .strip_prefix("PEER_ID ")
+        .expect("outsider must announce own identity")
+        .to_owned();
+    assert_ne!(receiver_id, other_id);
+    unlisted
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(invitation.as_bytes())
+        .unwrap();
+    unlisted.0.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    drop(unlisted.0.stdin.take());
+    assert!(
+        !exited(&mut unlisted.0).success(),
+        "non-listed peer accepted"
+    );
+    assert!(
+        !outsider_lines
+            .try_iter()
+            .any(|s| s.starts_with("STAGED_QUEUE "))
+    );
+
+    receiver
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(invitation.as_bytes())
+        .unwrap();
+    receiver.0.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    drop(receiver.0.stdin.take());
+    let mut inventory = format!("selection={}\n", hex_digest(&commit));
+    let mut stage_roots = Vec::new();
+    for (i, bytes) in payloads.iter().enumerate() {
+        let report = next_line(&receiver_lines);
+        assert!(
+            report.starts_with(&format!("STAGED_QUEUE {i} ")),
+            "{report}"
+        );
+        assert!(report.contains(&format!("ROOT={}", blake3::hash(bytes).to_hex())));
+        assert!(report.contains(&format!("SIZE={}", bytes.len())));
+        assert!(report.contains("NOT_APPLIED=true"));
+        let stage = PathBuf::from(
+            report
+                .strip_prefix(&format!("STAGED_QUEUE {i} "))
+                .unwrap()
+                .split(" ROOT=")
+                .next()
+                .unwrap(),
+        );
+        let private_root = stage.parent().unwrap().to_path_buf();
+        assert!(private_root.starts_with(std::env::temp_dir()));
+        assert!(
+            private_root
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("staya-direct-preview-batch-receiver-")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&private_root).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        #[cfg(windows)]
+        {
+            windows_private_stage::verify_owner_only_staging_root(&private_root).unwrap();
+            windows_private_stage::verify_owner_only_staged_file(&stage).unwrap();
+            windows_private_stage::prove_anonymous_file_read_denied(&stage).unwrap();
+        }
+        let actual = fs::read(&stage).expect("independently open real staged file");
+        assert_eq!(actual, *bytes);
+        queue
+            .record_verified_staging(entries[i].manifest, &actual)
+            .expect("batch stage matches locally pinned root");
+        assert_eq!(queue.outcomes()[i], ItemOutcome::VerifiedStaged);
+        inventory.push_str(&format!(
+            "item={i} size={} blake3={} verified=true\n",
+            bytes.len(),
+            blake3::hash(&actual).to_hex()
+        ));
+        if let Some(out) = std::env::var_os("STY_G1K_SINGLE_OUTPUT_DIR") {
+            let dir = PathBuf::from(out);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(format!("verified-{i:03}.bin")), &actual).unwrap();
+        }
+        stage_roots.push(private_root);
+    }
+    assert_eq!(
+        next_line(&receiver_lines),
+        "STY_G1K_UNLISTED_GET_DENIED=true"
+    );
+    let final_line = next_line(&receiver_lines);
+    assert!(
+        final_line.starts_with("QUEUE_COMPLETE COUNT=3 COMMITMENT="),
+        "{final_line}"
+    );
+    assert!(final_line.contains(&hex_digest(&commit)));
+    assert!(final_line.contains("NOT_APPLIED=true"));
+    assert!(
+        final_line.contains("RECONNECTS=0"),
+        "one physical QUIC connection was not proven: {final_line}"
+    );
+    assert!(exited(&mut receiver.0).success());
+    assert_eq!(queue.phase(), QueuePhase::Complete);
+    if let Some(out) = std::env::var_os("STY_G1K_SINGLE_OUTPUT_DIR") {
+        fs::write(PathBuf::from(out).join("inventory.txt"), inventory).unwrap();
+    }
+    drop(provider.0.stdin.take());
+    assert!(exited(&mut provider.0).success());
+    for dir in stage_roots {
+        fs::remove_dir_all(dir).expect("cleanup generated private staged object");
+    }
+    fs::remove_dir_all(fixture).expect("cleanup locally generated source corpus");
+    println!(
+        "STY_G1K_SINGLE_SESSION provider=1 receiver=1 direct_quic=true objects=3 unlisted_peer_denied=true unlisted_hash_denied=true full_bao=true no_file_gate=true"
+    );
+}
+
+#[test]
+fn batch_source_over_size_fails_before_invitation_or_peer_parsing() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "staya-oversize-selected-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).unwrap();
+    let selected = root.join("too-large.bin");
+    fs::write(&selected, vec![0x44; 8 * 1024 * 1024 + 1]).unwrap();
+
+    let (mut receiver, lines) = new_receiver(false);
+    let identity = next_line(&lines)
+        .strip_prefix("PEER_ID ")
+        .expect("real receiver must announce a valid identity")
+        .to_owned();
+    for operation in ["serve", "serve-batch"] {
+        let mut process = Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"));
+        process.arg(operation);
+        if operation == "serve" {
+            process.arg(&selected).arg(&identity);
+        } else {
+            process.arg(&identity).arg(&selected);
+        }
+        let result = process
+            .output()
+            .expect("source rejected by real child OS process");
+        assert!(
+            !result.status.success(),
+            "{operation} unexpectedly accepted oversized file"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("<=8 MiB"),
+            "{operation} failed for unrelated reason: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stdout.is_empty(), "no invitation may be announced");
+    }
+    drop(receiver.0.stdin.take());
+    let _ = exited(&mut receiver.0);
+    fs::remove_dir_all(root).unwrap();
+}

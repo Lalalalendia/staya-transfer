@@ -24,11 +24,12 @@ use staya_custody_lab::{
 use staya_transfer::{
     ByteRange, ContentId, Manifest, TransferRequest,
     bao::{MAX_BAO_PROOF_BYTES, verify_bao_range},
+    queue::{ItemOutcome, QueuePhase, QueueSelection, SelectedFile},
     recovery::{BaoStorageProfile, StoreIdentity},
 };
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::atomic::AtomicBool,
@@ -116,7 +117,10 @@ async fn endpoint(key: SecretKey) -> Result<Endpoint, String> {
         .map_err(|e| format!("direct QUIC endpoint: {e}"))
 }
 
-fn deny_unlisted(allowed: EndpointId, hash: Hash) -> (EventSender, tokio::task::JoinHandle<()>) {
+fn deny_unlisted(
+    allowed: EndpointId,
+    hashes: Vec<Hash>,
+) -> (EventSender, tokio::task::JoinHandle<()>) {
     let mask = EventMask {
         connected: ConnectMode::Intercept,
         get: RequestMode::Intercept,
@@ -140,7 +144,8 @@ fn deny_unlisted(allowed: EndpointId, hash: Hash) -> (EventSender, tokio::task::
                         .await;
                 }
                 ProviderMessage::GetRequestReceived(e) => {
-                    let allowed_object = e.request.hash == hash && e.request.ranges.is_blob();
+                    let allowed_object =
+                        hashes.contains(&e.request.hash) && e.request.ranges.is_blob();
                     let _ =
                         e.tx.send(if allowed_object {
                             Ok(())
@@ -222,21 +227,56 @@ async fn bounded_get_with_reconnect(
     }
 }
 
+/// Bounded lab-only path selection, with all bytes read from ONE opened file
+/// descriptor (not fs::read(path) after an unrelated metadata lookup).
+/// Initial Windows path/reparse races are not solved by this helper.
+fn read_explicit_synthetic_source(source: &Path) -> Result<Vec<u8>, String> {
+    let prior =
+        fs::symlink_metadata(source).map_err(|e| format!("inspect explicit source: {e}"))?;
+    if !prior.is_file()
+        || prior.file_type().is_symlink()
+        || prior.len() == 0
+        || prior.len() > MAX_OBJECT
+    {
+        return Err("selected source must be a nonempty regular non-symlink file <=8 MiB".into());
+    }
+    let mut opened = OpenOptions::new()
+        .read(true)
+        .open(source)
+        .map_err(|e| format!("open selected file: {e}"))?;
+    let pinned = opened
+        .metadata()
+        .map_err(|e| format!("inspect selected file handle: {e}"))?;
+    if !pinned.is_file() || pinned.len() != prior.len() {
+        return Err("selected file handle no longer matches approved size/type".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if pinned.dev() != prior.dev() || pinned.ino() != prior.ino() {
+            return Err("selected source inode changed between inspection and open".into());
+        }
+    }
+    let mut bytes = Vec::with_capacity(prior.len() as usize);
+    {
+        let mut bounded = Read::take(&mut opened, MAX_OBJECT + 1);
+        bounded
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("bounded read from selected handle: {e}"))?;
+    }
+    let after = opened
+        .metadata()
+        .map_err(|e| format!("reinspect selected file handle: {e}"))?;
+    if !after.is_file() || after.len() != prior.len() || bytes.len() as u64 != prior.len() {
+        return Err("selected source changed size or exceeded bounded read".into());
+    }
+    Ok(bytes)
+}
+
 async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     // A sender explicitly selects ONE local regular file and ONE allowed peer.
     // No directory enumeration, unsolicited PUSH, GET_MANY or Akula vault.
-    let info = fs::symlink_metadata(source).map_err(|e| format!("inspect source: {e}"))?;
-    if !info.is_file()
-        || info.file_type().is_symlink()
-        || info.len() == 0
-        || info.len() > MAX_OBJECT
-    {
-        return Err("source must be a nonempty regular file at most 8 MiB, not a symlink".into());
-    }
-    let bytes = fs::read(source).map_err(|e| format!("read explicit source: {e}"))?;
-    if bytes.len() as u64 != info.len() || bytes.is_empty() || bytes.len() as u64 > MAX_OBJECT {
-        return Err("source changed during read or exceeded bounded scope".into());
-    }
+    let bytes = read_explicit_synthetic_source(source)?;
     let allowed = EndpointId::from_str(allowed_text)
         .map_err(|e| format!("invalid explicitly allowed receiver ID: {e}"))?;
     let wanted = Hash::new(&bytes);
@@ -251,7 +291,7 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     if tag.hash != wanted {
         return Err("provider hash does not equal selected file".into());
     }
-    let (policy, worker) = deny_unlisted(allowed, wanted);
+    let (policy, worker) = deny_unlisted(allowed, vec![wanted]);
     let ep = endpoint(SecretKey::generate()).await?;
     let router = Router::builder(ep)
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(policy)))
@@ -285,6 +325,102 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     drop(tag);
     drop(store);
     fs::remove_dir_all(root).map_err(|e| format!("clean private provider data: {e}"))?;
+    Ok(())
+}
+
+/// G1k-c: one explicitly approved receiver, one provider, one endpoint ticket,
+/// a strictly bounded set of local regular-file contents. No folder scan,
+/// peer-provided source paths, or implicit permission for an unlisted root.
+async fn serve_batch(allowed_text: &str, sources: &[PathBuf]) -> Result<(), String> {
+    if sources.is_empty() || sources.len() > staya_transfer::queue::MAX_QUEUE_FILES {
+        return Err("batch requires 1..=8 explicitly selected files".into());
+    }
+    let allowed = EndpointId::from_str(allowed_text)
+        .map_err(|e| format!("invalid explicitly selected receiver ID: {e}"))?;
+    let mut chosen = Vec::with_capacity(sources.len());
+    let mut payloads = Vec::with_capacity(sources.len());
+    for source in sources {
+        let label = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("selected file has no safe UTF-8 local basename")?
+            .to_owned();
+        let bytes = read_explicit_synthetic_source(source)?;
+        chosen.push(SelectedFile {
+            label,
+            manifest: Manifest {
+                id: ContentId(*blake3::hash(&bytes).as_bytes()),
+                size: bytes.len() as u64,
+            },
+        });
+        payloads.push(bytes);
+    }
+    let selection =
+        QueueSelection::new(chosen).map_err(|e| format!("selected queue refused: {e:?}"))?;
+    let root = private_root("batch-sender")?;
+    let store = FsStore::load(&root)
+        .await
+        .map_err(|e| format!("batch provider FsStore: {e}"))?;
+    let mut tags = Vec::with_capacity(payloads.len());
+    let mut permitted_hashes = Vec::with_capacity(payloads.len());
+    for (i, bytes) in payloads.iter().enumerate() {
+        let expected = Hash::from_bytes(selection.entries()[i].manifest.id.0);
+        let tag = store
+            .add_slice(bytes)
+            .await
+            .map_err(|e| format!("seed selected object {i}: {e}"))?;
+        if tag.hash != expected {
+            return Err("provider stored root differs from pinned selected hash".into());
+        }
+        permitted_hashes.push(expected);
+        tags.push(tag);
+    }
+    let (policy, worker) = deny_unlisted(allowed, permitted_hashes);
+    let ep = endpoint(SecretKey::generate()).await?;
+    let router = Router::builder(ep)
+        .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(policy)))
+        .spawn();
+    let ticket = postcard::to_stdvec(&router.endpoint().addr())
+        .map_err(|e| format!("serialize batch direct-only endpoint: {e}"))?;
+    let mut invitation = format!(
+        "CONNECT_BATCH {} {} {}",
+        hex(&ticket),
+        hex(&selection.commitment()),
+        selection.entries().len()
+    );
+    for entry in selection.entries() {
+        let root = Hash::from_bytes(entry.manifest.id.0);
+        invitation.push_str(&format!(
+            " {} {} {}",
+            entry.label,
+            root.to_hex(),
+            entry.manifest.size
+        ));
+    }
+    if invitation.len() > 8192 {
+        return Err("batch invitation exceeded protocol limit".into());
+    }
+    println!("{invitation}");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("announce manually trusted batch: {e}"))?;
+
+    // The provider remains live only for this one operator-approved session.
+    tokio::task::spawn_blocking(|| {
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)
+    })
+    .await
+    .map_err(|e| format!("batch operator session: {e}"))?
+    .map_err(|e| format!("batch operator input: {e}"))?;
+    router
+        .shutdown()
+        .await
+        .map_err(|e| format!("batch provider shutdown: {e}"))?;
+    worker.abort();
+    drop(tags);
+    drop(store);
+    fs::remove_dir_all(root).map_err(|e| format!("clean batch provider private data: {e}"))?;
     Ok(())
 }
 
@@ -404,8 +540,6 @@ async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
     // Filesystem readback is independently Bao-authenticated for every group;
     // receiving GET bytes or an FsStore bitmap is not a durable receipt.
     let audited = if size < 16 * 1024 {
-        // Pinned FsStore can store tiny complete objects inline, with no
-        // physical .data/.obao4 files. Cold reopen and verify its full root.
         partial_adapter::audit_cold_small_complete_object(&root, identity).await?
     } else {
         let mut audited = Vec::with_capacity(size as usize);
@@ -465,6 +599,232 @@ async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// One physical receiver OS process and one QUIC endpoint for all selected
+/// objects. CONNECT_BATCH is manually accepted over an authenticated offline
+/// operator channel; it MUST NOT be treated as an unsolicited network grant.
+async fn receive_batch(lab_probe_unlisted: bool) -> Result<(), String> {
+    let key = SecretKey::generate();
+    println!("PEER_ID {}", key.public());
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("receiver identity: {e}"))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("read manually approved batch invitation: {e}"))?;
+    if input.len() > 8192 {
+        return Err("batch invitation exceeds input budget".into());
+    }
+    let fields: Vec<_> = input.split_whitespace().collect();
+    if fields.len() < 7 || fields[0] != "CONNECT_BATCH" {
+        return Err("expected CONNECT_BATCH ticket commitment count triples".into());
+    }
+    let count = fields[3]
+        .parse::<usize>()
+        .map_err(|e| format!("batch item count: {e}"))?;
+    if count == 0 || count > staya_transfer::queue::MAX_QUEUE_FILES || fields.len() != 4 + 3 * count
+    {
+        return Err("batch list length/count is invalid".into());
+    }
+    let address: EndpointAddr = postcard::from_bytes(&from_hex(fields[1])?)
+        .map_err(|e| format!("invalid batch endpoint ticket: {e}"))?;
+    if address.is_empty() {
+        return Err("direct sender address is missing; relay disabled".into());
+    }
+    let mut declared = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = 4 + 3 * i;
+        let trusted_hash =
+            Hash::from_str(fields[base + 1]).map_err(|e| format!("trusted batch root {i}: {e}"))?;
+        let size = fields[base + 2]
+            .parse::<u64>()
+            .map_err(|e| format!("trusted batch size {i}: {e}"))?;
+        declared.push(SelectedFile {
+            label: fields[base].to_owned(),
+            manifest: Manifest {
+                id: ContentId(*trusted_hash.as_bytes()),
+                size,
+            },
+        });
+    }
+    let selection = QueueSelection::new(declared)
+        .map_err(|e| format!("unsafe or over-budget batch invitation: {e:?}"))?;
+    let commitment = selection.commitment();
+    if !hex(&commitment).eq_ignore_ascii_case(fields[2]) {
+        return Err("operator trusted ordered batch commitment does not match the manifest".into());
+    }
+    let mut queue = selection.into_cursor();
+    let ep = endpoint(key).await?;
+    let mut conn =
+        tokio::time::timeout(STEP_TIMEOUT, ep.connect(address.clone(), iroh_blobs::ALPN))
+            .await
+            .map_err(|_| "batch direct QUIC timed out")?
+            .map_err(|e| format!("batch direct QUIC connection rejected: {e}"))?;
+    let mut reconnects = 0u8;
+
+    for i in 0..count {
+        let manifest = queue
+            .current()
+            .ok_or("no selected batch item available")?
+            .manifest;
+        let trusted_hash = Hash::from_bytes(manifest.id.0);
+        let size = manifest.size;
+        let identity = StoreIdentity {
+            manifest,
+            profile: BaoStorageProfile::IrohBlobs0103PreOrder16KiB,
+        };
+        // Each object receives its own process-generated private storage root.
+        // No peer label is ever a filesystem path component.
+        let root = private_root("batch-receiver")?;
+        let owner =
+            StoreLease::acquire(&root).map_err(|e| format!("batch item {i} OS custody: {e}"))?;
+        let actor = FsStore::load(&root)
+            .await
+            .map_err(|e| format!("batch item {i} FsStore: {e}"))?;
+        let ledger = SharedAdmission::new(Limits {
+            max_partial_objects: 1,
+            max_reserved_bytes: 4 * 1024 * 1024,
+            max_open_handles: 4,
+            max_retries_per_object: 0,
+        })
+        .map_err(|e| format!("batch item {i} bounded admission: {e}"))?;
+        let cancelled = AtomicBool::new(false);
+        let mut start = 0u64;
+        while start < size {
+            let end = start.saturating_add(RANGE).min(size);
+            let range = ByteRange::new(start, end, size)
+                .map_err(|e| format!("batch item {i} invalid range: {e:?}"))?;
+            let response = bounded_get_with_reconnect(
+                &ep,
+                &address,
+                &mut conn,
+                trusted_hash,
+                start..end,
+                &mut reconnects,
+            )
+            .await?;
+            if response.len() < 8
+                || u64::from_le_bytes(response[..8].try_into().map_err(|_| "bad Bao length")?)
+                    != size
+            {
+                return Err("batch GET returned a mismatched object size".into());
+            }
+            let request = TransferRequest::new(manifest, range.clone())
+                .map_err(|e| format!("batch item {i} request: {e:?}"))?;
+            verify_bao_range(&request, &response[8..])
+                .map_err(|e| format!("batch item {i} independent Bao: {e:?}"))?;
+            let (_, permit) = partial_adapter::stage_with_inflight_budget(
+                &owner, &ledger, &actor, identity, range, &response, &cancelled,
+            )
+            .await?;
+            drop(permit);
+            start = end;
+        }
+        ledger
+            .stop_admissions()
+            .map_err(|e| format!("batch stop admission: {e}"))?;
+        if !ledger
+            .admissions_drained()
+            .map_err(|e| format!("batch drain: {e}"))?
+        {
+            return Err("batch item still has an inflight write".into());
+        }
+        actor
+            .shutdown()
+            .await
+            .map_err(|e| format!("batch quiesce: {e}"))?;
+        drop(actor);
+        let audited = if size < 16 * 1024 {
+            partial_adapter::audit_cold_small_complete_object(&root, identity).await?
+        } else {
+            let mut audited = Vec::with_capacity(size as usize);
+            let mut offset = 0u64;
+            while offset < size {
+                let end = offset.saturating_add(RANGE).min(size);
+                let range = ByteRange::new(offset, end, size)
+                    .map_err(|e| format!("batch audit range: {e:?}"))?;
+                audited.extend(partial_adapter::audit_clean_closed_fixture(
+                    &root, identity, range,
+                )?);
+                offset = end;
+            }
+            audited
+        };
+        if audited.len() as u64 != size || *blake3::hash(&audited).as_bytes() != manifest.id.0 {
+            return Err("cold batch physical Bao audit did not match local selection".into());
+        }
+        owner
+            .validate_fence()
+            .map_err(|e| format!("batch custody: {e}"))?;
+        let staged = root.join(format!("staged-{i:03}.bin"));
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+            .map_err(|e| format!("create private staged batch item: {e}"))?;
+        output
+            .write_all(&audited)
+            .map_err(|e| format!("write batch item: {e}"))?;
+        output
+            .sync_all()
+            .map_err(|e| format!("sync batch item: {e}"))?;
+        drop(output);
+        #[cfg(windows)]
+        {
+            windows_private_stage::verify_owner_only_staging_root(&root)
+                .map_err(|e| format!("Windows protected batch directory: {e}"))?;
+            windows_private_stage::verify_owner_only_staged_file(&staged)
+                .map_err(|e| format!("Windows protected batch file: {e}"))?;
+        }
+        // The queue receipt is based on the *written staging file*,
+        // not a byte slice that was authenticated before the output write.
+        let staged_bytes = fs::read(&staged)
+            .map_err(|e| format!("physical readback of written batch stage: {e}"))?;
+        queue
+            .record_verified_staging(manifest, &staged_bytes)
+            .map_err(|e| format!("batch staged-file root/size verification: {e:?}"))?;
+        if queue.outcomes()[i] != ItemOutcome::VerifiedStaged {
+            return Err("batch cursor did not record a verified stage".into());
+        }
+        drop(owner);
+        println!(
+            "STAGED_QUEUE {i} {} ROOT={} SIZE={} RECONNECTS={} NOT_APPLIED=true",
+            staged.display(),
+            trusted_hash.to_hex(),
+            size,
+            reconnects
+        );
+        io::stdout()
+            .flush()
+            .map_err(|e| format!("batch report stage: {e}"))?;
+    }
+
+    if lab_probe_unlisted {
+        // Positive authorized requests were already proven on this same
+        // connection; a hash never selected by the sender must be rejected.
+        let absent = Hash::new(b"staya-g1k-lab-unlisted-object-not-in-selected-set");
+        match tokio::time::timeout(STEP_TIMEOUT, bounded_get(&conn, absent, 0..1)).await {
+            Ok(Err(_)) => println!("STY_G1K_UNLISTED_GET_DENIED=true"),
+            Ok(Ok(_)) => return Err("unlisted object GET was not refused".into()),
+            Err(_) => return Err("unlisted object denial timed out (not proof)".into()),
+        }
+    }
+    if queue.phase() != QueuePhase::Complete {
+        return Err("batch cursor did not finish after verified objects".into());
+    }
+    conn.close(0u8.into(), b"selected batch complete");
+    ep.close().await;
+    println!(
+        "QUEUE_COMPLETE COUNT={count} COMMITMENT={} RECONNECTS={} NOT_APPLIED=true",
+        hex(&commitment),
+        reconnects
+    );
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("batch completion report: {e}"))?;
+    Ok(())
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
@@ -475,6 +835,22 @@ async fn main() -> Result<(), String> {
             let peer = args.next().ok_or("serve requires receiver EndpointId")?;
             if args.next().is_some() { return Err("unexpected serve argument".into()); }
             serve(Path::new(&source), &peer).await
+        }
+        "serve-batch" => {
+            let allowed = args.next().ok_or("serve-batch requires receiver EndpointId")?;
+            let sources = args.map(PathBuf::from).collect::<Vec<_>>();
+            serve_batch(&allowed, &sources).await
+        }
+        "receive-batch" => {
+            let lab_probe = match args.next().as_deref() {
+                None => false,
+                Some("--lab-request-unlisted") => true,
+                Some(_) => return Err("unknown receive-batch option".into()),
+            };
+            if args.next().is_some() {
+                return Err("unexpected receive-batch argument".into());
+            }
+            receive_batch(lab_probe).await
         }
         "receive" => {
             // Explicit non-production fault injection; normal use needs no flag.
