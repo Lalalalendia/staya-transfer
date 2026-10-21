@@ -15,6 +15,8 @@ pub mod queue;
 
 pub mod recovery;
 
+pub mod source_snapshot;
+
 #[cfg(feature = "bao")]
 pub mod bao;
 
