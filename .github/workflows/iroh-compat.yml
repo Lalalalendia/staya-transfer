@@ -160,6 +160,10 @@ jobs:
         env:
           STY_G1K_SINGLE_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/single-session
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_provider_one_receiver_one_quic_connection_serves_exact_selected_set --nocapture
+      - name: STY-G1m-b real >8MiB QUIC transfer with bounded input and Bao cold audit
+        env:
+          STY_G1M_LARGE_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/large-physical
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate large_ -- --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
@@ -238,5 +242,8 @@ jobs:
             cmp "wire-output/wire-release/single-session/$f" "wire-output/wire-fork/single-session/$f"
           done
           echo STY_G1K_SINGLE_SESSION_EXACT_ROOTS_RELEASE_FORK_IDENTICAL=true
+          cmp wire-output/wire-release/large-physical/large-verified.bin wire-output/wire-fork/large-physical/large-verified.bin
+          cmp wire-output/wire-release/large-physical/inventory.txt wire-output/wire-fork/large-physical/inventory.txt
+          echo STY_G1M_RELEASE_FORK_REAL_LARGE_QUIC_STAGING_IDENTICAL=true
           echo STY_G1F_RELEASE_FORK_TWO_PROCESS_DIRECT_PREVIEW_IDENTICAL=true
           echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true

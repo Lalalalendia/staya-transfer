@@ -26,10 +26,11 @@ use staya_transfer::{
     bao::{MAX_BAO_PROOF_BYTES, verify_bao_range},
     queue::{ItemOutcome, QueuePhase, QueueSelection, SelectedFile},
     recovery::{BaoStorageProfile, StoreIdentity},
+    source_stream::{STREAM_BUFFER_BYTES, stream_to_uncommitted_quarantine},
 };
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::atomic::AtomicBool,
@@ -45,6 +46,8 @@ mod partial_adapter;
 mod windows_private_stage;
 
 const MAX_OBJECT: u64 = 8 * 1024 * 1024;
+// Opt-in real single-file QUIC laboratory path, never a batch/user-vault limit.
+const MAX_LARGE_OBJECT: u64 = 16 * 1024 * 1024;
 const RANGE: u64 = 64 * 1024;
 const STEP_TIMEOUT: Duration = Duration::from_secs(20);
 // Global session budget: a broken peer cannot cause unbounded network retries.
@@ -328,6 +331,150 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// G1m-b1: bounded >8 MiB real direct QUIC sender. A *single* locally
+/// selected pre-opened regular source handle supplies all bytes; the bytes
+/// are copied into a generated private spool using 64 KiB fixed buffering.
+/// Only after full BLAKE3, on-disk spool re-read and protected FsStore
+/// add_path(Copy) may the sender announce an object to ONE selected peer.
+///
+/// The original pathname open is NOT native reparse/symlink-race proof. This
+/// is synthetic/manual lab only, with no Device/Vault grant or File Gate.
+async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
+    let prior =
+        fs::symlink_metadata(source).map_err(|e| format!("inspect large selected source: {e}"))?;
+    if !prior.is_file()
+        || prior.file_type().is_symlink()
+        || prior.len() <= MAX_OBJECT
+        || prior.len() > MAX_LARGE_OBJECT
+    {
+        return Err("large preview requires regular non-symlink file >8 MiB and <=16 MiB".into());
+    }
+    let allowed = EndpointId::from_str(allowed_text)
+        .map_err(|e| format!("invalid explicitly selected large-file receiver: {e}"))?;
+    let mut opened = OpenOptions::new()
+        .read(true)
+        .open(source)
+        .map_err(|e| format!("open selected large-file handle: {e}"))?;
+    let pinned = opened
+        .metadata()
+        .map_err(|e| format!("stat selected large-file handle: {e}"))?;
+    if !pinned.is_file() || pinned.len() != prior.len() {
+        return Err("selected large-file handle changed type or length".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if prior.dev() != pinned.dev() || prior.ino() != pinned.ino() {
+            return Err("selected large-file pathname replaced before opening".into());
+        }
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; STREAM_BUFFER_BYTES];
+    let mut total = 0u64;
+    loop {
+        let count = match opened.read(&mut buffer) {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(format!("hash selected handle: {e}")),
+        };
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or("large source byte counter overflow")?;
+        if total > MAX_LARGE_OBJECT {
+            return Err("large selected source exceeded strict 16 MiB limit".into());
+        }
+        hasher.update(&buffer[..count]);
+    }
+    if total != prior.len() || opened.metadata().map_err(|e| e.to_string())?.len() != total {
+        return Err("large selected source changed size during initial root binding".into());
+    }
+    let manifest = Manifest {
+        id: ContentId(*hasher.finalize().as_bytes()),
+        size: total,
+    };
+    opened
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| format!("rewind selected descriptor: {e}"))?;
+
+    let root = private_root("large-sender")?;
+    let spool_path = root.join("pinned-source-spool.bin");
+    let mut spool = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&spool_path)
+        .map_err(|e| format!("create private uncommitted source spool: {e}"))?;
+    let cancelled = AtomicBool::new(false);
+    let copied = stream_to_uncommitted_quarantine(&mut opened, &mut spool, manifest, &cancelled)
+        .map_err(|e| format!("bounded selected source stream refused: {e:?}"))?;
+    if copied.bytes != manifest.size || copied.max_requested_read_bytes > STREAM_BUFFER_BYTES {
+        return Err("bounded input stream did not verify the selected object".into());
+    }
+    spool
+        .sync_all()
+        .map_err(|e| format!("sync private source spool: {e}"))?;
+    drop(spool);
+    // An independent second File descriptor re-reads the physical spool.
+    let mut spool_cold =
+        fs::File::open(&spool_path).map_err(|e| format!("cold source spool open: {e}"))?;
+    let cold_spool =
+        stream_to_uncommitted_quarantine(&mut spool_cold, &mut io::sink(), manifest, &cancelled)
+            .map_err(|e| format!("cold source spool BLAKE3 mismatch: {e:?}"))?;
+    if cold_spool.root != manifest.id || cold_spool.bytes != manifest.size {
+        return Err("cold source spool receipt did not match pinned selection".into());
+    }
+    drop(spool_cold);
+
+    let store = FsStore::load(&root)
+        .await
+        .map_err(|e| format!("large sender protected FsStore: {e}"))?;
+    // The pinned 0.103.1 release and pinned fork support add_path in Copy
+    // mode: unlike add_slice, it does not allocate an entire >8MiB Bytes blob.
+    let stored = store
+        .add_path(&spool_path)
+        .await
+        .map_err(|e| format!("streamed large source FsStore import: {e}"))?;
+    let wanted = Hash::from_bytes(manifest.id.0);
+    if stored.hash != wanted {
+        return Err("FsStore add_path returned a different large-object BLAKE3 root".into());
+    }
+    let (policy, worker) = deny_unlisted(allowed, vec![wanted]);
+    let ep = endpoint(SecretKey::generate()).await?;
+    let router = Router::builder(ep)
+        .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(policy)))
+        .spawn();
+    let ticket = postcard::to_stdvec(&router.endpoint().addr())
+        .map_err(|e| format!("serialize large-file direct endpoint: {e}"))?;
+    println!(
+        "CONNECT {} {} {}",
+        hex(&ticket),
+        wanted.to_hex(),
+        manifest.size
+    );
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("announce manually approved large file: {e}"))?;
+    tokio::task::spawn_blocking(|| {
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)
+    })
+    .await
+    .map_err(|e| format!("large sender operator session: {e}"))?
+    .map_err(|e| format!("large sender operator input: {e}"))?;
+    router
+        .shutdown()
+        .await
+        .map_err(|e| format!("large sender shutdown: {e}"))?;
+    worker.abort();
+    drop(stored);
+    drop(store);
+    fs::remove_dir_all(root).map_err(|e| format!("clean large sender private data: {e}"))?;
+    Ok(())
+}
+
 /// G1k-c: one explicitly approved receiver, one provider, one endpoint ticket,
 /// a strictly bounded set of local regular-file contents. No folder scan,
 /// peer-provided source paths, or implicit permission for an unlisted root.
@@ -424,7 +571,7 @@ async fn serve_batch(allowed_text: &str, sources: &[PathBuf]) -> Result<(), Stri
     Ok(())
 }
 
-async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
+async fn receive(lab_drop_after_first_range: bool, large: bool) -> Result<(), String> {
     // The receiver key never leaves this process and is never persisted.
     let private_key = SecretKey::generate();
     println!("PEER_ID {}", private_key.public());
@@ -453,7 +600,11 @@ async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
     let size = fields[3]
         .parse::<u64>()
         .map_err(|e| format!("object size: {e}"))?;
-    if size == 0 || size > MAX_OBJECT {
+    if large {
+        if size <= MAX_OBJECT || size > MAX_LARGE_OBJECT {
+            return Err("large preview requires object >8 MiB and <=16 MiB".into());
+        }
+    } else if size == 0 || size > MAX_OBJECT {
         return Err("object must be nonempty and at most 8 MiB".into());
     }
     if lab_drop_after_first_range && size <= RANGE {
@@ -537,45 +688,89 @@ async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
         .await
         .map_err(|e| format!("quiesce real FsStore: {e}"))?;
     drop(actor);
-    // Filesystem readback is independently Bao-authenticated for every group;
-    // receiving GET bytes or an FsStore bitmap is not a durable receipt.
-    let audited = if size < 16 * 1024 {
-        partial_adapter::audit_cold_small_complete_object(&root, identity).await?
+    // Cold physical source readback: every output range is first independently
+    // Bao-audited from the cleanly closed FsStore, never trusted from its bitfield.
+    // Large objects are written in 64KiB chunks, never one entire-size Vec.
+    let staged = root.join(if large {
+        "large-verified-staged.bin"
     } else {
-        let mut audited = Vec::with_capacity(size as usize);
-        let mut offset = 0u64;
-        while offset < size {
-            let end = offset.saturating_add(RANGE).min(size);
-            let range = ByteRange::new(offset, end, size).map_err(|e| format!("{e:?}"))?;
-            audited.extend(partial_adapter::audit_clean_closed_fixture(
-                &root, identity, range,
-            )?);
-            offset = end;
-        }
-        audited
-    };
-    if audited.len() as u64 != size || *blake3::hash(&audited).as_bytes() != manifest.id.0 {
-        return Err("cold physical readback did not match the trusted root".into());
-    }
-    owner
-        .validate_fence()
-        .map_err(|e| format!("final local custody: {e}"))?;
-
-    // Output is an untrusted private staging *copy*, not an Akula user file
-    // and not a File Gate publication. Never accept a peer-supplied filename.
-    let staged = root.join("verified-staged.bin");
+        "verified-staged.bin"
+    });
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&staged)
         .map_err(|e| format!("new private stage: {e}"))?;
-    output
-        .write_all(&audited)
-        .map_err(|e| format!("write private stage: {e}"))?;
+    if large {
+        owner
+            .validate_fence()
+            .map_err(|e| format!("large stage OS custody: {e}"))?;
+        let mut offset = 0u64;
+        let mut hasher = blake3::Hasher::new();
+        while offset < size {
+            let end = offset.saturating_add(RANGE).min(size);
+            let range = ByteRange::new(offset, end, size)
+                .map_err(|e| format!("large physical audit range: {e:?}"))?;
+            let authenticated =
+                partial_adapter::audit_clean_closed_fixture(&root, identity, range)?;
+            if authenticated.len() as u64 != end - offset || authenticated.len() > RANGE as usize {
+                return Err("large Bao cold audit returned incorrect bounded span".into());
+            }
+            output
+                .write_all(&authenticated)
+                .map_err(|e| format!("write Bao-audited large private stage: {e}"))?;
+            hasher.update(&authenticated);
+            offset = end;
+        }
+        if offset != size || hasher.finalize().as_bytes() != &manifest.id.0 {
+            return Err("large physical Bao audit failed complete pinned BLAKE3 root".into());
+        }
+    } else {
+        let audited = if size < 16 * 1024 {
+            partial_adapter::audit_cold_small_complete_object(&root, identity).await?
+        } else {
+            let mut audited = Vec::with_capacity(size as usize);
+            let mut offset = 0u64;
+            while offset < size {
+                let end = offset.saturating_add(RANGE).min(size);
+                let range = ByteRange::new(offset, end, size).map_err(|e| format!("{e:?}"))?;
+                audited.extend(partial_adapter::audit_clean_closed_fixture(
+                    &root, identity, range,
+                )?);
+                offset = end;
+            }
+            audited
+        };
+        if audited.len() as u64 != size || *blake3::hash(&audited).as_bytes() != manifest.id.0 {
+            return Err("cold physical readback did not match the trusted root".into());
+        }
+        owner
+            .validate_fence()
+            .map_err(|e| format!("final local custody: {e}"))?;
+        output
+            .write_all(&audited)
+            .map_err(|e| format!("write private stage: {e}"))?;
+    }
     output
         .sync_all()
         .map_err(|e| format!("sync private stage: {e}"))?;
     drop(output);
+
+    if large {
+        // Fresh descriptor after the actual staged write: this checks the
+        // physical staged bytes, not the in-memory range reconstruction.
+        let mut readback =
+            fs::File::open(&staged).map_err(|e| format!("cold final large stage open: {e}"))?;
+        let cold_stage =
+            stream_to_uncommitted_quarantine(&mut readback, &mut io::sink(), manifest, &cancelled)
+                .map_err(|e| format!("post-write cold stage BLAKE3/size audit: {e:?}"))?;
+        if cold_stage.root != manifest.id || cold_stage.bytes != manifest.size {
+            return Err("post-write final stage receipt differs from pinned root".into());
+        }
+        owner
+            .validate_fence()
+            .map_err(|e| format!("large final staging OS custody: {e}"))?;
+    }
     #[cfg(windows)]
     {
         windows_private_stage::verify_owner_only_staging_root(&root)
@@ -853,6 +1048,20 @@ async fn main() -> Result<(), String> {
             if args.next().is_some() { return Err("unexpected serve argument".into()); }
             serve(Path::new(&source), &peer).await
         }
+        "serve-large" => {
+            let path = args.next().ok_or("serve-large requires synthetic source path")?;
+            let peer = args.next().ok_or("serve-large requires receiver EndpointId")?;
+            if args.next().is_some() {
+                return Err("unexpected serve-large argument".into());
+            }
+            serve_large(Path::new(&path), &peer).await
+        }
+        "receive-large" => {
+            if args.next().is_some() {
+                return Err("receive-large takes no arguments".into());
+            }
+            receive(false, true).await
+        }
         "serve-batch" => {
             let allowed = args.next().ok_or("serve-batch requires receiver EndpointId")?;
             let sources = args.map(PathBuf::from).collect::<Vec<_>>();
@@ -879,7 +1088,7 @@ async fn main() -> Result<(), String> {
             if args.next().is_some() {
                 return Err("unexpected receive argument".into());
             }
-            receive(lab_drop).await
+            receive(lab_drop, false).await
         }
         _ => Err("usage: staya-direct-preview receive | serve <file> <receiver-id>; manual direct-only private staging".into())
     }

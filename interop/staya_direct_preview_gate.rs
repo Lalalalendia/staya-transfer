@@ -711,3 +711,241 @@ fn batch_source_over_size_fails_before_invitation_or_peer_parsing() {
     let _ = exited(&mut receiver.0);
     fs::remove_dir_all(root).unwrap();
 }
+
+/// G1m-b1: a real provider/receiver pair sends a blob larger than the
+/// original 8MiB preview ceiling, without reading the whole source/stage
+/// into a Vec. Only generated synthetic bytes; no user file/Sync privileges.
+#[test]
+fn real_large_direct_quic_uses_bounded_source_and_cold_staging() {
+    use std::io::Read;
+    const SIZE: u64 = 8 * 1024 * 1024 + 17;
+    const BUF: usize = 64 * 1024;
+    const LARGE_WAIT: Duration = Duration::from_secs(180);
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let base = std::env::temp_dir().join(format!(
+        "staya-g1m-quic-source-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&base).expect("new disposable source fixture");
+    let path = base.join("synthetic-large.bin");
+    let mut created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .expect("create synthetic 8MiB+17 source");
+    let mut expected = blake3::Hasher::new();
+    let full_chunk: Vec<u8> = (0..BUF).map(|i| (i.wrapping_mul(37) % 251) as u8).collect();
+    let mut left = SIZE;
+    while left > 0 {
+        let n = (left as usize).min(BUF);
+        created
+            .write_all(&full_chunk[..n])
+            .expect("write bounded synthetic input");
+        expected.update(&full_chunk[..n]);
+        left -= n as u64;
+    }
+    created.sync_all().unwrap();
+    drop(created);
+    let expected_root = expected.finalize().to_hex().to_string();
+
+    let mut receiver = OwnedProcess(
+        Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"))
+            .arg("receive-large")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("independent QUIC large receiver process"),
+    );
+    let receiver_lines = capture(&mut receiver.0);
+    let allowed = receiver_lines
+        .recv_timeout(LARGE_WAIT)
+        .expect("large receiver must announce PEER_ID");
+    let allowed = allowed
+        .strip_prefix("PEER_ID ")
+        .expect("large receiver ephemeral identity")
+        .to_owned();
+    let mut sender = OwnedProcess(
+        Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"))
+            .arg("serve-large")
+            .arg(&path)
+            .arg(&allowed)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("independent QUIC large sender process"),
+    );
+    let sender_lines = capture(&mut sender.0);
+    let invitation = sender_lines
+        .recv_timeout(LARGE_WAIT)
+        .expect("bounded spool/import must announce CONNECT");
+    let parts: Vec<_> = invitation.split_whitespace().collect();
+    assert_eq!(parts.len(), 4);
+    assert_eq!(parts[0], "CONNECT");
+    assert_eq!(parts[2], expected_root);
+    assert_eq!(parts[3], SIZE.to_string());
+
+    // The same approved ticket never permits a different real QUIC identity.
+    let mut stranger = OwnedProcess(
+        Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"))
+            .arg("receive-large")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let stranger_lines = capture(&mut stranger.0);
+    let stranger_id = stranger_lines.recv_timeout(LARGE_WAIT).unwrap();
+    assert_ne!(stranger_id, format!("PEER_ID {allowed}"));
+    stranger
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(invitation.as_bytes())
+        .unwrap();
+    stranger.0.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    drop(stranger.0.stdin.take());
+    let outsider_code = await_large_exit(&mut stranger.0, LARGE_WAIT);
+    assert!(
+        !outsider_code.success(),
+        "unlisted large-file recipient read selected content"
+    );
+    assert!(stranger_lines.try_iter().all(|s| !s.starts_with("STAGED ")));
+
+    receiver
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(invitation.as_bytes())
+        .unwrap();
+    receiver.0.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    drop(receiver.0.stdin.take());
+    let report = receiver_lines
+        .recv_timeout(LARGE_WAIT)
+        .expect("real 8MiB+17 receiver stage");
+    assert!(report.starts_with("STAGED "), "{report}");
+    assert!(report.contains(&format!("ROOT={expected_root}")));
+    assert!(report.contains(&format!("SIZE={SIZE}")));
+    assert!(report.contains("NOT_APPLIED=true"));
+    let staged = PathBuf::from(
+        report
+            .strip_prefix("STAGED ")
+            .unwrap()
+            .split(" ROOT=")
+            .next()
+            .unwrap(),
+    );
+    let private = staged.parent().unwrap().to_path_buf();
+    assert!(
+        private
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("staya-direct-preview-receiver-")
+    );
+    assert_eq!(staged.file_name().unwrap(), "large-verified-staged.bin");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    #[cfg(windows)]
+    {
+        windows_private_stage::verify_owner_only_staging_root(&private).unwrap();
+        windows_private_stage::verify_owner_only_staged_file(&staged).unwrap();
+        windows_private_stage::prove_anonymous_file_read_denied(&staged).unwrap();
+    }
+    let actual_len = fs::metadata(&staged).unwrap().len();
+    assert_eq!(actual_len, SIZE);
+    // Independent third File handle: 64KiB readback, never a full-file Vec.
+    let mut actual = fs::File::open(&staged).unwrap();
+    let mut readback_root = blake3::Hasher::new();
+    let mut buf = [0u8; BUF];
+    let mut count = 0u64;
+    loop {
+        let n = actual.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        readback_root.update(&buf[..n]);
+        count += n as u64;
+    }
+    assert_eq!(count, SIZE);
+    assert_eq!(readback_root.finalize().to_hex().to_string(), expected_root);
+    drop(actual);
+    assert!(await_large_exit(&mut receiver.0, LARGE_WAIT).success());
+    if let Some(folder) = std::env::var_os("STY_G1M_LARGE_OUTPUT_DIR") {
+        let output = PathBuf::from(folder);
+        fs::create_dir_all(&output).unwrap();
+        fs::copy(&staged, output.join("large-verified.bin")).unwrap();
+        fs::write(
+            output.join("inventory.txt"),
+            format!("size={SIZE}\nroot={expected_root}\nverified=true\nnot_applied=true\n",),
+        )
+        .unwrap();
+    }
+    drop(sender.0.stdin.take());
+    assert!(await_large_exit(&mut sender.0, LARGE_WAIT).success());
+    fs::remove_dir_all(private).unwrap();
+    fs::remove_dir_all(base).unwrap();
+    println!(
+        "STY_G1M_REAL_LARGE_QUIC bytes={SIZE} unauthorized_peer_denied=true physical_bao_audited=true bounded_receiver=true not_applied=true"
+    );
+}
+
+fn await_large_exit(process: &mut Child, limit: Duration) -> ExitStatus {
+    let start = Instant::now();
+    loop {
+        if let Some(result) = process.try_wait().expect("query large preview child") {
+            return result;
+        }
+        assert!(
+            start.elapsed() < limit,
+            "large QUIC sender/receiver process timed out"
+        );
+        thread::sleep(Duration::from_millis(30));
+    }
+}
+
+#[test]
+fn large_sender_rejects_beyond_16_mib_before_announcing_ticket() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("staya-g1m-reject-{}-{nonce}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let too_large = root.join("over-limit.bin");
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&too_large)
+        .unwrap();
+    file.set_len(16 * 1024 * 1024 + 1).unwrap();
+    drop(file);
+    let result = Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"))
+        .arg("serve-large")
+        .arg(&too_large)
+        .arg("not-an-endpoint-id")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        result.stdout.is_empty(),
+        "oversized file may not get a CONNECT ticket"
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("<=16 MiB"));
+    fs::remove_dir_all(root).unwrap();
+}
