@@ -838,6 +838,7 @@ fn real_large_direct_quic_uses_bounded_source_and_cold_staging() {
     }
     assert_eq!(count, SIZE);
     assert_eq!(readback_root.finalize().to_hex().to_string(), expected_root);
+    drop(actual);
     assert!(await_large_exit(&mut receiver.0, LARGE_WAIT).success());
     if let Some(folder) = std::env::var_os("STY_G1M_LARGE_OUTPUT_DIR") {
         let output = PathBuf::from(folder);
