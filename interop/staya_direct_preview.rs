@@ -787,12 +787,18 @@ async fn receive_batch(lab_probe_unlisted: bool) -> Result<(), String> {
             return Err("batch cursor did not record a verified stage".into());
         }
         drop(owner);
+        let progress = queue.verified_staging_progress();
         println!(
-            "STAGED_QUEUE {i} {} ROOT={} SIZE={} RECONNECTS={} NOT_APPLIED=true",
+            "STAGED_QUEUE {i} {} ROOT={} SIZE={} RECONNECTS={} VERIFIED_ITEMS={}/{} VERIFIED_BYTES={}/{} PHASE={:?} NOT_APPLIED=true",
             staged.display(),
             trusted_hash.to_hex(),
             size,
-            reconnects
+            reconnects,
+            progress.verified_staged_items,
+            progress.selected_items,
+            progress.verified_staged_bytes,
+            progress.selected_bytes,
+            progress.phase
         );
         io::stdout()
             .flush()
@@ -814,10 +820,21 @@ async fn receive_batch(lab_probe_unlisted: bool) -> Result<(), String> {
     }
     conn.close(0u8.into(), b"selected batch complete");
     ep.close().await;
+    let progress = queue.verified_staging_progress();
+    if progress.verified_staged_items != progress.selected_items
+        || progress.verified_staged_bytes != progress.selected_bytes
+    {
+        return Err("complete batch has unverified staged bytes".into());
+    }
     println!(
-        "QUEUE_COMPLETE COUNT={count} COMMITMENT={} RECONNECTS={} NOT_APPLIED=true",
+        "QUEUE_COMPLETE COUNT={count} COMMITMENT={} RECONNECTS={} VERIFIED_ITEMS={}/{} VERIFIED_BYTES={}/{} PHASE={:?} NOT_APPLIED=true",
         hex(&commitment),
-        reconnects
+        reconnects,
+        progress.verified_staged_items,
+        progress.selected_items,
+        progress.verified_staged_bytes,
+        progress.selected_bytes,
+        progress.phase
     );
     io::stdout()
         .flush()
