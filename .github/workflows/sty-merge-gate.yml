@@ -12,9 +12,10 @@ permissions:
   pull-requests: read
   actions: read
 
-concurrency:
-  group: sty-merge-gate-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+# No workflow-level concurrency lock: duplicate/stale runs are rejected by
+# the exact source-head SHA checks in the read-only ready job. GitHub has
+# shown pending zero-job runs when repeated PR edits cancel this workflow.
+# Keep the workflow schedulable so the protected main check can materialize.
 
 jobs:
   preflight:
