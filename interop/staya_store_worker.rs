@@ -3,7 +3,7 @@
 //! This executable is a crash laboratory, NOT an installable Staya service.
 //! It deliberately has no clean CLOSE, network commands, or File Gate access.
 //! After custody begins, unexpected errors abort the whole process, not just
-//! its actor. Linux IPC rejection before custody exits without opening a lock.
+//! its actor. Linux/Windows IPC rejection before custody exits without opening a lock.
 
 use iroh_blobs::store::fs::FsStore;
 use staya_custody_lab::StoreLease;
@@ -17,7 +17,9 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-use staya_native_parent_lab::ipc::receive_parent_arm;
+use staya_native_parent_lab::ipc::receive_parent_arm as linux_parent_arm;
+#[cfg(windows)]
+use staya_windows_job_lab::ipc::receive_parent_arm as windows_parent_arm;
 
 const READY: &str = ".g2-05h3g-fsstore-ready";
 // Pin above the Iroh default 16 KiB inline-outboard threshold.
@@ -67,6 +69,12 @@ async fn main() {
         .to_string_lossy()
         .parse()
         .unwrap_or_else(|e| abort_hold("arguments", e));
+    #[cfg(windows)]
+    let pipe_name = args
+        .next()
+        .unwrap_or_else(|| abort_hold("arguments", "missing private Windows pipe"))
+        .to_string_lossy()
+        .into_owned();
     if args.next().is_some() {
         abort_hold("arguments", "unexpected additional input");
     }
@@ -75,13 +83,20 @@ async fn main() {
     // socket has proven SO_PEERCRED, live parent pidfd, versioned ARM and ACK.
     // This is still not executable attestation or a signed file grant.
     #[cfg(target_os = "linux")]
-    let _parent_witness = receive_parent_arm(parent).unwrap_or_else(|error| {
+    let _parent_witness = linux_parent_arm(parent).unwrap_or_else(|error| {
         // No StoreLease, FsStore actor or writable user data exists yet.
         eprintln!("STY_G2_05H3G2_HOLD stage=ipc-before-custody error={error}");
         process::exit(73);
     });
+    // G2-05h3g4: Windows must independently verify the actual named-pipe
+    // server PID, live parent handle and exact nonce ARM/ACK. The launcher
+    // verifies the connected client PID equals its Job-bound OS worker.
+    // Missing or spoofed IPC is denied before any lock or actor is created.
     #[cfg(windows)]
-    let _ = parent; // Containment on Windows belongs to the suspended Job launcher.
+    let _parent_witness = windows_parent_arm(&pipe_name, parent).unwrap_or_else(|error| {
+        eprintln!("STY_G2_05H3G4_HOLD stage=windows-ipc-before-custody error={error}");
+        process::exit(73);
+    });
 
     let owner = StoreLease::acquire(&root).unwrap_or_else(|e| abort_hold("custody", e));
     owner
