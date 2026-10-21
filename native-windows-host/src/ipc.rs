@@ -1,7 +1,7 @@
 //! STY-G2 Windows restricted named pipe OS identity + ARM/ACK laboratory.
 //! NOT installed production IPC, a signed permission or a File Gate grant.
 
-use crate::windows::ProcessWatcher;
+use crate::{overlapped, windows::ProcessWatcher};
 use std::{
     ffi::{OsStr, c_void},
     fmt::Write as _,
@@ -9,12 +9,14 @@ use std::{
     mem::size_of,
     os::windows::ffi::OsStrExt,
     ptr::null_mut,
+    time::{Duration, Instant},
 };
 
 type Handle = *mut c_void;
 const INVALID: Handle = -1isize as Handle;
 const PIPE_ACCESS_DUPLEX: u32 = 3;
 const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
+const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
 const PIPE_REJECT_REMOTE_CLIENTS: u32 = 8;
 const GENERIC_READ_WRITE: u32 = 0xC000_0000;
 const OPEN_EXISTING: u32 = 3;
@@ -22,7 +24,7 @@ const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
 const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 const TOKEN_QUERY: u32 = 8;
 const TOKEN_USER: u32 = 1;
-const ERROR_PIPE_CONNECTED: u32 = 535;
+const IPC_TIMEOUT: Duration = Duration::from_secs(8);
 const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 2;
 const MAGIC: [u8; 4] = *b"STYW";
 const VERSION: [u8; 2] = 1u16.to_be_bytes();
@@ -39,7 +41,6 @@ struct SecurityAttributes {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetCurrentProcess() -> Handle;
-    fn GetLastError() -> u32;
     fn LocalFree(value: Handle) -> Handle;
     fn CloseHandle(value: Handle) -> i32;
     fn CreateNamedPipeW(
@@ -52,7 +53,6 @@ unsafe extern "system" {
         default_timeout: u32,
         security: *const SecurityAttributes,
     ) -> Handle;
-    fn ConnectNamedPipe(pipe: Handle, overlapped: Handle) -> i32;
     fn GetNamedPipeClientProcessId(pipe: Handle, pid: *mut u32) -> i32;
     fn GetNamedPipeServerProcessId(pipe: Handle, pid: *mut u32) -> i32;
     fn CreateFileW(
@@ -64,20 +64,6 @@ unsafe extern "system" {
         flags: u32,
         template: Handle,
     ) -> Handle;
-    fn ReadFile(
-        handle: Handle,
-        buffer: Handle,
-        len: u32,
-        actual: *mut u32,
-        overlapped: Handle,
-    ) -> i32;
-    fn WriteFile(
-        handle: Handle,
-        buffer: *const c_void,
-        len: u32,
-        actual: *mut u32,
-        overlapped: Handle,
-    ) -> i32;
 }
 #[link(name = "advapi32")]
 unsafe extern "system" {
@@ -247,57 +233,6 @@ fn verify(data: &[u8; FRAME_SIZE], kind: u8, expected: Option<&[u8; 32]>) -> io:
     }
     Ok(nonce)
 }
-fn write_frame(handle: Handle, mut bytes: &[u8]) -> io::Result<()> {
-    while !bytes.is_empty() {
-        let mut n = 0;
-        // SAFETY: synchronous Win32 call and writable length output.
-        if unsafe {
-            WriteFile(
-                handle,
-                bytes.as_ptr().cast(),
-                bytes.len() as u32,
-                &mut n,
-                null_mut(),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "IPC send zero"));
-        }
-        bytes = &bytes[n as usize..];
-    }
-    Ok(())
-}
-fn read_frame(handle: Handle, mut bytes: &mut [u8]) -> io::Result<()> {
-    while !bytes.is_empty() {
-        let mut n = 0;
-        // SAFETY: synchronous Win32 call and writable buffers.
-        if unsafe {
-            ReadFile(
-                handle,
-                bytes.as_mut_ptr().cast(),
-                bytes.len() as u32,
-                &mut n,
-                null_mut(),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "short IPC frame",
-            ));
-        }
-        let (_, remainder) = bytes.split_at_mut(n as usize);
-        bytes = remainder;
-    }
-    Ok(())
-}
-
 /// Server is created by a first-party launcher before a suspended Job worker.
 pub struct PendingPipe {
     handle: Owned,
@@ -330,7 +265,7 @@ impl PendingPipe {
         let raw = unsafe {
             CreateNamedPipeW(
                 name_wide.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
                 PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 4096,
@@ -348,14 +283,11 @@ impl PendingPipe {
         &self.name
     }
     /// Connects once, checks actual kernel worker PID and nonce.
-    /// Synchronous transport is LAB-ONLY; no production bounded cancellation.
+    /// All three kernel operations share an 8-second deadline; cancellation
+    /// is drained before any borrowed OVERLAPPED state can be dropped.
     pub fn arm(self, expected_worker_pid: u32) -> io::Result<ArmedPipe> {
-        // SAFETY: server handle is live; Windows may connect before this call.
-        if unsafe { ConnectNamedPipe(self.handle.0, null_mut()) } == 0
-            && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED
-        {
-            return Err(io::Error::last_os_error());
-        }
+        let deadline = Instant::now() + IPC_TIMEOUT;
+        overlapped::connect(self.handle.0, deadline)?;
         let mut actual = 0;
         // SAFETY: kernel supplies real connected client process identity.
         if unsafe { GetNamedPipeClientProcessId(self.handle.0, &mut actual) } == 0 {
@@ -370,9 +302,9 @@ impl PendingPipe {
         }
         let mut challenge = [0u8; 32];
         random(&mut challenge)?;
-        write_frame(self.handle.0, &frame(ARM, &challenge))?;
+        overlapped::write_all(self.handle.0, &frame(ARM, &challenge), deadline)?;
         let mut reply = [0u8; FRAME_SIZE];
-        read_frame(self.handle.0, &mut reply)?;
+        overlapped::read_exact(self.handle.0, &mut reply, deadline)?;
         verify(&reply, ACK, Some(&challenge))?;
         if witness.exited(0)? {
             return Err(deny("worker died before nonce ACK"));
@@ -396,6 +328,7 @@ pub fn receive_parent_arm(pipe_name: &str, expected_parent_pid: u32) -> io::Resu
     {
         return Err(deny("invalid fixed private pipe namespace"));
     }
+    let deadline = Instant::now() + IPC_TIMEOUT;
     let pipe = wide(pipe_name);
     // SAFETY: local pipe client uses IDENTIFICATION SQOS to prevent untrusted
     // server from impersonating a higher-privilege worker token.
@@ -406,7 +339,7 @@ pub fn receive_parent_arm(pipe_name: &str, expected_parent_pid: u32) -> io::Resu
             0,
             null_mut(),
             OPEN_EXISTING,
-            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION | FILE_FLAG_OVERLAPPED,
             null_mut(),
         )
     };
@@ -424,12 +357,12 @@ pub fn receive_parent_arm(pipe_name: &str, expected_parent_pid: u32) -> io::Resu
         return Err(deny("launcher died before Windows IPC"));
     }
     let mut request = [0u8; FRAME_SIZE];
-    read_frame(handle.0, &mut request)?;
+    overlapped::read_exact(handle.0, &mut request, deadline)?;
     let nonce = verify(&request, ARM, None)?;
     if parent_witness.exited(0)? {
         return Err(deny("launcher died before nonce ACK"));
     }
-    write_frame(handle.0, &frame(ACK, &nonce))?;
+    overlapped::write_all(handle.0, &frame(ACK, &nonce), deadline)?;
     if parent_witness.exited(0)? {
         return Err(deny("launcher died immediately after ACK"));
     }
