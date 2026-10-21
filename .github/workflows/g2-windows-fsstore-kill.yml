@@ -64,6 +64,15 @@ jobs:
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_manual_direct_file_two_os_processes_and_unlisted_peer_denied --nocapture
       - name: STY-G1i Windows QUIC reconnect, root and bytes verified
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact manual_preview_reconnects_real_quic_after_forced_close --nocapture
+      - name: STY-G1k Windows real three-item queue staging
+        env:
+          STY_G1K_OUTPUT_DIR: ${{ github.workspace }}/g1k-ordered-queue
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact three_explicit_files_real_quic_serial_queue_with_physical_readback --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-queue-preview-${{ matrix.variant }}
+          path: g1k-ordered-queue/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: windows-direct-preview-${{ matrix.variant }}
@@ -71,6 +80,8 @@ jobs:
           if-no-files-found: error
       - name: STY-G2-05h3g native Windows JobObject kill with real pinned FsStore
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_store_worker_gate -- --exact real_fsstore_native_containment_survives_parent_kill --nocapture
+      - name: STY-G2-05h3g4 real Windows FsStore refuses unarmed/forged/missing IPC
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_store_worker_gate real_fsstore_windows_ipc_denies_ -- --nocapture
       - name: Strict Windows integration lint
         run: cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --all-targets -- -D warnings
       - name: Windows integration format
@@ -100,3 +111,13 @@ jobs:
           cmp preview/windows-direct-preview-release/received.bin preview/windows-direct-preview-fork/received.bin
           cmp preview/windows-direct-preview-release/inventory.txt preview/windows-direct-preview-fork/inventory.txt
           echo STY_G1F_WINDOWS_TWO_PROCESS_PRIVATE_PREVIEW_IDENTICAL=true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: windows-queue-preview-*
+          path: queue
+      - name: Compare Windows release/fork three real QUIC queue items
+        run: |
+          for f in selected-000.bin selected-001.bin selected-002.bin inventory.txt; do
+            cmp "queue/windows-queue-preview-release/$f" "queue/windows-queue-preview-fork/$f"
+          done
+          echo STY_G1K_WINDOWS_RELEASE_FORK_THREE_ACTUAL_QUIC_OBJECTS_IDENTICAL=true

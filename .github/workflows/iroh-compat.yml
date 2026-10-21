@@ -152,6 +152,10 @@ jobs:
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_manual_direct_file_two_os_processes_and_unlisted_peer_denied --nocapture
       - name: STY-G1i real QUIC reconnect after forced break, Bao re-audit
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact manual_preview_reconnects_real_quic_after_forced_close --nocapture
+      - name: STY-G1k real three-item sequential QUIC sessions and physical staging
+        env:
+          STY_G1K_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/ordered-queue
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact three_explicit_files_real_quic_serial_queue_with_physical_readback --nocapture
       - name: Strict G1e formatting and lint
         run: |
           cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
@@ -222,5 +226,9 @@ jobs:
           echo STY_G2_06I_RELEASE_FORK_64_PHYSICAL_BAO_RANGES_IDENTICAL=true
           cmp wire-output/wire-release/direct-preview/received.bin wire-output/wire-fork/direct-preview/received.bin
           cmp wire-output/wire-release/direct-preview/inventory.txt wire-output/wire-fork/direct-preview/inventory.txt
+          for f in selected-000.bin selected-001.bin selected-002.bin inventory.txt; do
+            cmp "wire-output/wire-release/ordered-queue/$f" "wire-output/wire-fork/ordered-queue/$f"
+          done
+          echo STY_G1K_RELEASE_FORK_THREE_ACTUAL_QUIC_OBJECTS_IDENTICAL=true
           echo STY_G1F_RELEASE_FORK_TWO_PROCESS_DIRECT_PREVIEW_IDENTICAL=true
           echo STY_G1E_RELEASE_FORK_WIRE_BAO_IDENTICAL=true
