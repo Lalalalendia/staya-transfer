@@ -41,6 +41,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Fast Rustfmt preflight before Windows FsStore compilation
+        run: cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
       - name: Validate immutable release/fork Cargo.lock
         run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1
       - name: Native Windows TerminateProcess + real FsStore + Bao restart audit
@@ -93,8 +95,6 @@ jobs:
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_store_worker_gate real_fsstore_windows_ipc_denies_ -- --nocapture
       - name: Strict Windows integration lint
         run: cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --all-targets -- -D warnings
-      - name: Windows integration format
-        run: cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
 
   windows-terminate-quic-byte-compare:
     needs: native-fsstore-terminate
