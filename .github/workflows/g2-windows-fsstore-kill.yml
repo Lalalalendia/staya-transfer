@@ -72,6 +72,15 @@ jobs:
         env:
           STY_G1K_SINGLE_OUTPUT_DIR: ${{ github.workspace }}/g1k-single-session
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_provider_one_receiver_one_quic_connection_serves_exact_selected_set --nocapture
+      - name: STY-G1m-b native Windows >8MiB direct QUIC, outsider denial and readback
+        env:
+          STY_G1M_LARGE_OUTPUT_DIR: ${{ github.workspace }}/large-physical
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate large_ -- --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-large-physical-${{ matrix.variant }}
+          path: large-physical/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: windows-single-session-${{ matrix.variant }}
@@ -140,3 +149,12 @@ jobs:
             cmp "single/windows-single-session-release/$f" "single/windows-single-session-fork/$f"
           done
           echo STY_G1K_ONE_SESSION_WINDOWS_RELEASE_FORK_IDENTICAL=true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: windows-large-physical-*
+          path: large
+      - name: Compare Windows release/fork >8MiB verified physical QUIC files
+        run: |
+          cmp large/windows-large-physical-release/large-verified.bin large/windows-large-physical-fork/large-verified.bin
+          cmp large/windows-large-physical-release/inventory.txt large/windows-large-physical-fork/inventory.txt
+          echo STY_G1M_WINDOWS_RELEASE_FORK_REAL_LARGE_QUIC_STAGING_IDENTICAL=true
