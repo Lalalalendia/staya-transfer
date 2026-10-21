@@ -331,7 +331,6 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     Ok(())
 }
 
-
 /// G1m-b1: bounded >8 MiB real direct QUIC sender. A *single* locally
 /// selected pre-opened regular source handle supplies all bytes; the bytes
 /// are copied into a generated private spool using 64 KiB fixed buffering.
@@ -341,8 +340,8 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
 /// The original pathname open is NOT native reparse/symlink-race proof. This
 /// is synthetic/manual lab only, with no Device/Vault grant or File Gate.
 async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
-    let prior = fs::symlink_metadata(source)
-        .map_err(|e| format!("inspect large selected source: {e}"))?;
+    let prior =
+        fs::symlink_metadata(source).map_err(|e| format!("inspect large selected source: {e}"))?;
     if !prior.is_file()
         || prior.file_type().is_symlink()
         || prior.len() <= MAX_OBJECT
@@ -356,7 +355,8 @@ async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
         .read(true)
         .open(source)
         .map_err(|e| format!("open selected large-file handle: {e}"))?;
-    let pinned = opened.metadata()
+    let pinned = opened
+        .metadata()
         .map_err(|e| format!("stat selected large-file handle: {e}"))?;
     if !pinned.is_file() || pinned.len() != prior.len() {
         return Err("selected large-file handle changed type or length".into());
@@ -381,7 +381,9 @@ async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
         if count == 0 {
             break;
         }
-        total = total.checked_add(count as u64).ok_or("large source byte counter overflow")?;
+        total = total
+            .checked_add(count as u64)
+            .ok_or("large source byte counter overflow")?;
         if total > MAX_LARGE_OBJECT {
             return Err("large selected source exceeded strict 16 MiB limit".into());
         }
@@ -394,7 +396,8 @@ async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
         id: ContentId(*hasher.finalize().as_bytes()),
         size: total,
     };
-    opened.seek(SeekFrom::Start(0))
+    opened
+        .seek(SeekFrom::Start(0))
         .map_err(|e| format!("rewind selected descriptor: {e}"))?;
 
     let root = private_root("large-sender")?;
@@ -405,20 +408,21 @@ async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
         .open(&spool_path)
         .map_err(|e| format!("create private uncommitted source spool: {e}"))?;
     let cancelled = AtomicBool::new(false);
-    let copied = stream_to_uncommitted_quarantine(
-        &mut opened, &mut spool, manifest, &cancelled,
-    ).map_err(|e| format!("bounded selected source stream refused: {e:?}"))?;
+    let copied = stream_to_uncommitted_quarantine(&mut opened, &mut spool, manifest, &cancelled)
+        .map_err(|e| format!("bounded selected source stream refused: {e:?}"))?;
     if copied.bytes != manifest.size || copied.max_requested_read_bytes > STREAM_BUFFER_BYTES {
         return Err("bounded input stream did not verify the selected object".into());
     }
-    spool.sync_all().map_err(|e| format!("sync private source spool: {e}"))?;
+    spool
+        .sync_all()
+        .map_err(|e| format!("sync private source spool: {e}"))?;
     drop(spool);
     // An independent second File descriptor re-reads the physical spool.
-    let mut spool_cold = fs::File::open(&spool_path)
-        .map_err(|e| format!("cold source spool open: {e}"))?;
-    let cold_spool = stream_to_uncommitted_quarantine(
-        &mut spool_cold, &mut io::sink(), manifest, &cancelled,
-    ).map_err(|e| format!("cold source spool BLAKE3 mismatch: {e:?}"))?;
+    let mut spool_cold =
+        fs::File::open(&spool_path).map_err(|e| format!("cold source spool open: {e}"))?;
+    let cold_spool =
+        stream_to_uncommitted_quarantine(&mut spool_cold, &mut io::sink(), manifest, &cancelled)
+            .map_err(|e| format!("cold source spool BLAKE3 mismatch: {e:?}"))?;
     if cold_spool.root != manifest.id || cold_spool.bytes != manifest.size {
         return Err("cold source spool receipt did not match pinned selection".into());
     }
@@ -429,7 +433,9 @@ async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
         .map_err(|e| format!("large sender protected FsStore: {e}"))?;
     // The pinned 0.103.1 release and pinned fork support add_path in Copy
     // mode: unlike add_slice, it does not allocate an entire >8MiB Bytes blob.
-    let stored = store.add_path(&spool_path).await
+    let stored = store
+        .add_path(&spool_path)
+        .await
         .map_err(|e| format!("streamed large source FsStore import: {e}"))?;
     let wanted = Hash::from_bytes(manifest.id.0);
     if stored.hash != wanted {
@@ -442,8 +448,15 @@ async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
         .spawn();
     let ticket = postcard::to_stdvec(&router.endpoint().addr())
         .map_err(|e| format!("serialize large-file direct endpoint: {e}"))?;
-    println!("CONNECT {} {} {}", hex(&ticket), wanted.to_hex(), manifest.size);
-    io::stdout().flush().map_err(|e| format!("announce manually approved large file: {e}"))?;
+    println!(
+        "CONNECT {} {} {}",
+        hex(&ticket),
+        wanted.to_hex(),
+        manifest.size
+    );
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("announce manually approved large file: {e}"))?;
     tokio::task::spawn_blocking(|| {
         let mut input = String::new();
         io::stdin().read_line(&mut input)
@@ -451,7 +464,10 @@ async fn serve_large(source: &Path, allowed_text: &str) -> Result<(), String> {
     .await
     .map_err(|e| format!("large sender operator session: {e}"))?
     .map_err(|e| format!("large sender operator input: {e}"))?;
-    router.shutdown().await.map_err(|e| format!("large sender shutdown: {e}"))?;
+    router
+        .shutdown()
+        .await
+        .map_err(|e| format!("large sender shutdown: {e}"))?;
     worker.abort();
     drop(stored);
     drop(store);
@@ -686,7 +702,8 @@ async fn receive(lab_drop_after_first_range: bool, large: bool) -> Result<(), St
         .open(&staged)
         .map_err(|e| format!("new private stage: {e}"))?;
     if large {
-        owner.validate_fence()
+        owner
+            .validate_fence()
             .map_err(|e| format!("large stage OS custody: {e}"))?;
         let mut offset = 0u64;
         let mut hasher = blake3::Hasher::new();
@@ -694,13 +711,13 @@ async fn receive(lab_drop_after_first_range: bool, large: bool) -> Result<(), St
             let end = offset.saturating_add(RANGE).min(size);
             let range = ByteRange::new(offset, end, size)
                 .map_err(|e| format!("large physical audit range: {e:?}"))?;
-            let authenticated = partial_adapter::audit_clean_closed_fixture(
-                &root, identity, range,
-            )?;
+            let authenticated =
+                partial_adapter::audit_clean_closed_fixture(&root, identity, range)?;
             if authenticated.len() as u64 != end - offset || authenticated.len() > RANGE as usize {
                 return Err("large Bao cold audit returned incorrect bounded span".into());
             }
-            output.write_all(&authenticated)
+            output
+                .write_all(&authenticated)
                 .map_err(|e| format!("write Bao-audited large private stage: {e}"))?;
             hasher.update(&authenticated);
             offset = end;
@@ -727,28 +744,31 @@ async fn receive(lab_drop_after_first_range: bool, large: bool) -> Result<(), St
         if audited.len() as u64 != size || *blake3::hash(&audited).as_bytes() != manifest.id.0 {
             return Err("cold physical readback did not match the trusted root".into());
         }
-        owner.validate_fence()
+        owner
+            .validate_fence()
             .map_err(|e| format!("final local custody: {e}"))?;
-        output.write_all(&audited)
+        output
+            .write_all(&audited)
             .map_err(|e| format!("write private stage: {e}"))?;
     }
-    output.sync_all()
+    output
+        .sync_all()
         .map_err(|e| format!("sync private stage: {e}"))?;
     drop(output);
 
     if large {
         // Fresh descriptor after the actual staged write: this checks the
         // physical staged bytes, not the in-memory range reconstruction.
-        let mut readback = fs::File::open(&staged)
-            .map_err(|e| format!("cold final large stage open: {e}"))?;
-        let cold_stage = stream_to_uncommitted_quarantine(
-            &mut readback, &mut io::sink(), manifest, &cancelled,
-        )
-        .map_err(|e| format!("post-write cold stage BLAKE3/size audit: {e:?}"))?;
+        let mut readback =
+            fs::File::open(&staged).map_err(|e| format!("cold final large stage open: {e}"))?;
+        let cold_stage =
+            stream_to_uncommitted_quarantine(&mut readback, &mut io::sink(), manifest, &cancelled)
+                .map_err(|e| format!("post-write cold stage BLAKE3/size audit: {e:?}"))?;
         if cold_stage.root != manifest.id || cold_stage.bytes != manifest.size {
             return Err("post-write final stage receipt differs from pinned root".into());
         }
-        owner.validate_fence()
+        owner
+            .validate_fence()
             .map_err(|e| format!("large final staging OS custody: {e}"))?;
     }
     #[cfg(windows)]
