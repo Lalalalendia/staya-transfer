@@ -26,6 +26,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Fast Rustfmt preflight before costly Iroh tests
+        run: cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
       - name: Enforce pinned release/fork Cargo.lock
         run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1 > /dev/null
       - name: Real FsStore to Staya Bao verification
@@ -160,10 +162,8 @@ jobs:
         env:
           STY_G1K_SINGLE_OUTPUT_DIR: ${{ github.workspace }}/wire-artifact/single-session
         run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact one_provider_one_receiver_one_quic_connection_serves_exact_selected_set --nocapture
-      - name: Strict G1e formatting and lint
-        run: |
-          cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
-          cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Strict G1e Clippy lint
+        run: cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --all-targets -- -D warnings
       - uses: actions/upload-artifact@v4
         with:
           name: wire-${{ matrix.variant }}
