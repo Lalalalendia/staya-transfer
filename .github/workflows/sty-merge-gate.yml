@@ -45,8 +45,8 @@ jobs:
           set -euo pipefail
           ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].each { |file| YAML.parse_file(file) }; puts "All workflow YAML parsed"'
 
-  ready:
-    name: ready
+  merge-ready:
+    name: staya-merge-ready
     # GitHub may treat a SKIPPED required job as passing. Always schedule the
     # required PR job, even after preflight failure, and explicitly fail it.
     if: ${{ always() && github.event_name == 'pull_request' }}
