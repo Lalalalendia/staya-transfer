@@ -1,0 +1,44 @@
+name: STY-G1n real provider consent fence
+on:
+  pull_request:
+    paths:
+      - 'interop/staya_direct_preview.rs'
+      - 'interop/staya_direct_preview_gate.rs'
+      - '.github/workflows/g1n-consent-fence.yml'
+      - 'docs/ADR-0040-g1n-provider-manual-consent-fence.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sty-g1n-consent-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  actual-sender-receiver:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            variant: release
+          - os: ubuntu-24.04
+            variant: fork
+          - os: windows-2022
+            variant: release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Validate exact immutable Cargo.lock
+        shell: bash
+        run: cargo metadata --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --format-version 1 > /dev/null
+      - name: Check Staya opt-in preview formatting
+        run: cargo fmt --manifest-path interop/${{ matrix.variant }}/Cargo.toml --all -- --check
+      - name: Test disarmed, revoked and expired sender-local policy
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --bin staya-direct-preview -- consent_gate_tests --nocapture
+      - name: Prove real pre-consent QUIC GET denial and exact post-consent staging
+        run: cargo test --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --test staya_direct_preview_gate -- --exact provider_refuses_real_quic_before_sender_arms_and_then_stages_exact_file --nocapture
+      - name: Lint sender, receiver and E2E on exact candidate
+        run: cargo clippy --manifest-path interop/${{ matrix.variant }}/Cargo.toml --locked --bin staya-direct-preview --test staya_direct_preview_gate -- -D warnings

@@ -32,8 +32,11 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::atomic::AtomicBool,
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 #[path = "fsstore_partial_adapter.rs"]
@@ -117,9 +120,29 @@ async fn endpoint(key: SecretKey) -> Result<Endpoint, String> {
         .map_err(|e| format!("direct QUIC endpoint: {e}"))
 }
 
+/// Provider-side network gate. A live authenticated connection and each new
+/// ranged GET are checked independently. The manual gate is never derived from
+/// an untrusted endpoint ticket; only the local sender operator can arm it.
+fn gate_active_expiry(expires_at: Option<Instant>) -> bool {
+    expires_at.is_none_or(|deadline| Instant::now() < deadline)
+}
+
+fn gate_active(armed: &AtomicBool, expires_at: Option<Instant>) -> bool {
+    armed.load(Ordering::Acquire) && gate_active_expiry(expires_at)
+}
+
 fn deny_unlisted(
     allowed: EndpointId,
     hashes: Vec<Hash>,
+) -> (EventSender, tokio::task::JoinHandle<()>) {
+    deny_unlisted_with_gate(allowed, hashes, Arc::new(AtomicBool::new(true)), None)
+}
+
+fn deny_unlisted_with_gate(
+    allowed: EndpointId,
+    hashes: Vec<Hash>,
+    armed: Arc<AtomicBool>,
+    expires_at: Option<Instant>,
 ) -> (EventSender, tokio::task::JoinHandle<()>) {
     let mask = EventMask {
         connected: ConnectMode::Intercept,
@@ -134,9 +157,10 @@ fn deny_unlisted(
         while let Some(event) = events.recv().await {
             match event {
                 ProviderMessage::ClientConnected(e) => {
-                    let allowed_peer = e.endpoint_id == Some(allowed);
+                    let permitted =
+                        gate_active(&armed, expires_at) && e.endpoint_id == Some(allowed);
                     let _ =
-                        e.tx.send(if allowed_peer {
+                        e.tx.send(if permitted {
                             Ok(())
                         } else {
                             Err(AbortReason::Permission)
@@ -144,10 +168,11 @@ fn deny_unlisted(
                         .await;
                 }
                 ProviderMessage::GetRequestReceived(e) => {
-                    let allowed_object =
-                        hashes.contains(&e.request.hash) && e.request.ranges.is_blob();
+                    let permitted = gate_active(&armed, expires_at)
+                        && hashes.contains(&e.request.hash)
+                        && e.request.ranges.is_blob();
                     let _ =
-                        e.tx.send(if allowed_object {
+                        e.tx.send(if permitted {
                             Ok(())
                         } else {
                             Err(AbortReason::Permission)
@@ -328,10 +353,29 @@ async fn serve(source: &Path, allowed_text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Read one bounded, local operator command without blocking the QUIC runtime.
+async fn operator_line() -> Result<String, String> {
+    let value = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        io::stdin().read_line(&mut line).map(|_| line)
+    })
+    .await
+    .map_err(|e| format!("operator input task: {e}"))?
+    .map_err(|e| format!("operator input: {e}"))?;
+    if value.len() > 256 {
+        return Err("operator command exceeds 256 bytes".into());
+    }
+    Ok(value)
+}
+
 /// G1k-c: one explicitly approved receiver, one provider, one endpoint ticket,
 /// a strictly bounded set of local regular-file contents. No folder scan,
 /// peer-provided source paths, or implicit permission for an unlisted root.
-async fn serve_batch(allowed_text: &str, sources: &[PathBuf]) -> Result<(), String> {
+async fn serve_batch(
+    allowed_text: &str,
+    sources: &[PathBuf],
+    consent_required: bool,
+) -> Result<(), String> {
     if sources.is_empty() || sources.len() > staya_transfer::queue::MAX_QUEUE_FILES {
         return Err("batch requires 1..=8 explicitly selected files".into());
     }
@@ -375,7 +419,13 @@ async fn serve_batch(allowed_text: &str, sources: &[PathBuf]) -> Result<(), Stri
         permitted_hashes.push(expected);
         tags.push(tag);
     }
-    let (policy, worker) = deny_unlisted(allowed, permitted_hashes);
+    // Opt-in sender consent: the provider is listening but denies even the
+    // selected QUIC identity until a matching local AUTHORIZE command arrives.
+    // The process-local grant is short-lived and vanishes on restart.
+    let armed = Arc::new(AtomicBool::new(!consent_required));
+    let expires_at = consent_required.then(|| Instant::now() + Duration::from_secs(180));
+    let (policy, worker) =
+        deny_unlisted_with_gate(allowed, permitted_hashes, Arc::clone(&armed), expires_at);
     let ep = endpoint(SecretKey::generate()).await?;
     let router = Router::builder(ep)
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, Some(policy)))
@@ -405,14 +455,36 @@ async fn serve_batch(allowed_text: &str, sources: &[PathBuf]) -> Result<(), Stri
         .flush()
         .map_err(|e| format!("announce manually trusted batch: {e}"))?;
 
-    // The provider remains live only for this one operator-approved session.
-    tokio::task::spawn_blocking(|| {
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)
-    })
-    .await
-    .map_err(|e| format!("batch operator session: {e}"))?
-    .map_err(|e| format!("batch operator input: {e}"))?;
+    if consent_required {
+        // The controlling Akula sender must first independently validate
+        // the receiver's decision and real QUIC identity. This lab command
+        // itself is neither a signed Device grant nor a durable replay fence.
+        let line = operator_line().await?;
+        let expected = format!(
+            "AUTHORIZE {} {}",
+            hex(&selection.commitment()),
+            allowed_text
+        );
+        if line.trim() != expected || !gate_active_expiry(expires_at) {
+            armed.store(false, Ordering::Release);
+            router
+                .shutdown()
+                .await
+                .map_err(|e| format!("shutdown denied batch provider: {e}"))?;
+            worker.abort();
+            return Err("sender denied a mismatched or expired authorization".into());
+        }
+        armed.store(true, Ordering::Release);
+        println!("PROVIDER_ARMED");
+        io::stdout()
+            .flush()
+            .map_err(|e| format!("announce armed provider: {e}"))?;
+    }
+
+    // A second local command or EOF revokes new GETs before shutdown.
+    // Legacy serve-batch retains its original one-line close behavior.
+    let _ = operator_line().await?;
+    armed.store(false, Ordering::Release);
     router
         .shutdown()
         .await
@@ -602,7 +674,7 @@ async fn receive(lab_drop_after_first_range: bool) -> Result<(), String> {
 /// One physical receiver OS process and one QUIC endpoint for all selected
 /// objects. CONNECT_BATCH is manually accepted over an authenticated offline
 /// operator channel; it MUST NOT be treated as an unsolicited network grant.
-async fn receive_batch(lab_probe_unlisted: bool) -> Result<(), String> {
+async fn receive_batch(lab_probe_unlisted: bool, lab_probe_before_arm: bool) -> Result<(), String> {
     let key = SecretKey::generate();
     println!("PEER_ID {}", key.public());
     io::stdout()
@@ -655,6 +727,34 @@ async fn receive_batch(lab_probe_unlisted: bool) -> Result<(), String> {
     }
     let mut queue = selection.into_cursor();
     let ep = endpoint(key).await?;
+    if lab_probe_before_arm {
+        // Actual early network access using the authorized ephemeral receiver
+        // key must fail while the sender's provider is not yet armed.
+        let first = Hash::from_bytes(queue.current().ok_or("empty selected queue")?.manifest.id.0);
+        let denied =
+            match tokio::time::timeout(STEP_TIMEOUT, ep.connect(address.clone(), iroh_blobs::ALPN))
+                .await
+            {
+                Ok(Err(_)) => true,
+                Ok(Ok(conn)) => {
+                    let attempt =
+                        tokio::time::timeout(STEP_TIMEOUT, bounded_get(&conn, first, 0..1)).await;
+                    conn.close(0u8.into(), b"pre-arm refusal");
+                    matches!(attempt, Ok(Err(_)))
+                }
+                Err(_) => false,
+            };
+        if !denied {
+            return Err("pre-arm authenticated peer GET was not explicitly denied".into());
+        }
+        println!("PREARM_DENIED=true");
+        io::stdout()
+            .flush()
+            .map_err(|e| format!("announce real pre-arm refusal: {e}"))?;
+        if operator_line().await?.trim() != "CONTINUE" {
+            return Err("pre-arm lab requires explicit CONTINUE after provider arming".into());
+        }
+    }
     let mut conn =
         tokio::time::timeout(STEP_TIMEOUT, ep.connect(address.clone(), iroh_blobs::ALPN))
             .await
@@ -853,21 +953,25 @@ async fn main() -> Result<(), String> {
             if args.next().is_some() { return Err("unexpected serve argument".into()); }
             serve(Path::new(&source), &peer).await
         }
-        "serve-batch" => {
+        "serve-batch" | "serve-batch-gated" => {
+            let gated = cmd == "serve-batch-gated";
             let allowed = args.next().ok_or("serve-batch requires receiver EndpointId")?;
             let sources = args.map(PathBuf::from).collect::<Vec<_>>();
-            serve_batch(&allowed, &sources).await
+            serve_batch(&allowed, &sources, gated).await
         }
         "receive-batch" => {
-            let lab_probe = match args.next().as_deref() {
-                None => false,
-                Some("--lab-request-unlisted") => true,
-                Some(_) => return Err("unknown receive-batch option".into()),
-            };
-            if args.next().is_some() {
-                return Err("unexpected receive-batch argument".into());
+            let mut lab_probe_unlisted = false;
+            let mut lab_probe_before_arm = false;
+            for option in args {
+                match option.as_str() {
+                    "--lab-request-unlisted" if !lab_probe_unlisted => lab_probe_unlisted = true,
+                    "--lab-probe-before-arm" if !lab_probe_before_arm => {
+                        lab_probe_before_arm = true;
+                    }
+                    _ => return Err("unknown or repeated receive-batch option".into()),
+                }
             }
-            receive_batch(lab_probe).await
+            receive_batch(lab_probe_unlisted, lab_probe_before_arm).await
         }
         "receive" => {
             // Explicit non-production fault injection; normal use needs no flag.
@@ -882,5 +986,25 @@ async fn main() -> Result<(), String> {
             receive(lab_drop).await
         }
         _ => Err("usage: staya-direct-preview receive | serve <file> <receiver-id>; manual direct-only private staging".into())
+    }
+}
+
+#[cfg(test)]
+mod consent_gate_tests {
+    use super::*;
+
+    #[test]
+    fn operator_gate_denies_until_armed_after_revoke_and_on_expiry() {
+        let armed = AtomicBool::new(false);
+        let deadline = Some(Instant::now() + Duration::from_secs(30));
+        assert!(!gate_active(&armed, deadline));
+        armed.store(true, Ordering::Release);
+        assert!(gate_active(&armed, deadline));
+        assert!(!gate_active(
+            &armed,
+            Some(Instant::now() - Duration::from_secs(1)),
+        ));
+        armed.store(false, Ordering::Release);
+        assert!(!gate_active(&armed, deadline));
     }
 }

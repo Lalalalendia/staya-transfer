@@ -667,6 +667,116 @@ fn one_provider_one_receiver_one_quic_connection_serves_exact_selected_set() {
 }
 
 #[test]
+fn provider_refuses_real_quic_before_sender_arms_and_then_stages_exact_file() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let fixture = std::env::temp_dir().join(format!(
+        "staya-consent-provider-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&fixture).expect("disposable sender fixture");
+    let path = fixture.join("consented.bin");
+    let bytes = (0..(64 * 1024 + 17))
+        .map(|i| ((i * 29 + 5) % 251) as u8)
+        .collect::<Vec<_>>();
+    fs::write(&path, &bytes).expect("write disposable file");
+
+    let mut receiver_cmd = Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"));
+    receiver_cmd
+        .arg("receive-batch")
+        .arg("--lab-probe-before-arm")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let mut receiver = OwnedProcess(receiver_cmd.spawn().expect("real receiver process"));
+    let receiver_lines = capture(&mut receiver.0);
+    let receiver_id = next_line(&receiver_lines)
+        .strip_prefix("PEER_ID ")
+        .expect("receiver ephemeral QUIC identity")
+        .to_owned();
+
+    let mut sender_cmd = Command::new(env!("CARGO_BIN_EXE_staya-direct-preview"));
+    sender_cmd
+        .arg("serve-batch-gated")
+        .arg(&receiver_id)
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let mut sender = OwnedProcess(sender_cmd.spawn().expect("real gated sender process"));
+    let sender_lines = capture(&mut sender.0);
+    let invitation = next_line(&sender_lines);
+    let fields = invitation.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(fields.first(), Some(&"CONNECT_BATCH"));
+    assert_eq!(fields.len(), 7);
+    assert_eq!(fields[3], "1");
+    assert_eq!(fields[4], "consented.bin");
+    assert_eq!(fields[5], blake3::hash(&bytes).to_hex().as_str());
+    assert_eq!(fields[6], bytes.len().to_string());
+
+    receiver
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(format!("{invitation}\n").as_bytes())
+        .unwrap();
+    // Not a synthetic policy helper: the approved receiver key really tries
+    // QUIC and the pre-arm connection or GET must be rejected by the sender.
+    assert_eq!(next_line(&receiver_lines), "PREARM_DENIED=true");
+
+    // Only the local sender operator, after verifying Akula consent, can arm
+    // this exact receiver and selected object-set commitment. Merely knowing
+    // a printed invitation is not enough to fetch bytes before this point.
+    sender
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(format!("AUTHORIZE {} {}\n", fields[2], receiver_id).as_bytes())
+        .unwrap();
+    assert_eq!(next_line(&sender_lines), "PROVIDER_ARMED");
+    receiver
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"CONTINUE\n")
+        .unwrap();
+    drop(receiver.0.stdin.take());
+
+    let report = next_line(&receiver_lines);
+    assert!(report.starts_with("STAGED_QUEUE 0 "), "{report}");
+    assert!(report.contains(&format!("ROOT={}", blake3::hash(&bytes).to_hex())));
+    assert!(report.contains("VERIFIED_ITEMS=1/1"));
+    assert!(report.contains(&format!("VERIFIED_BYTES={}/{}", bytes.len(), bytes.len())));
+    assert!(report.contains("NOT_APPLIED=true"));
+    let stage = PathBuf::from(
+        report
+            .strip_prefix("STAGED_QUEUE 0 ")
+            .unwrap()
+            .split(" ROOT=")
+            .next()
+            .unwrap(),
+    );
+    let cold_bytes = fs::read(&stage).expect("independently read actual written stage");
+    assert_eq!(cold_bytes, bytes);
+    assert_eq!(blake3::hash(&cold_bytes), blake3::hash(&bytes));
+    let finish = next_line(&receiver_lines);
+    assert!(finish.starts_with("QUEUE_COMPLETE COUNT=1 "), "{finish}");
+    assert!(finish.contains("PHASE=Complete"));
+    assert!(exited(&mut receiver.0).success());
+
+    // EOF revokes authorization; provider must exit without an APPLIED claim.
+    drop(sender.0.stdin.take());
+    assert!(exited(&mut sender.0).success());
+    fs::remove_dir_all(stage.parent().unwrap()).expect("cleanup private receiver stage");
+    fs::remove_dir_all(fixture).expect("cleanup sender fixture");
+}
+
+#[test]
 fn batch_source_over_size_fails_before_invitation_or_peer_parsing() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
